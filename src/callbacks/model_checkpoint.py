@@ -1,5 +1,5 @@
 import os
-
+import torch
 class ModelCheckpoint:
     """
     ModelCheckpoint is a class that saves the model based on the monitored metric.
@@ -77,3 +77,9 @@ class ModelCheckpoint:
     
     def reset(self):
         self.best = None
+
+    def get_best_model(self):
+        if self.best is not None:
+            return torch.load(self.get_model_path())
+        else:
+            raise ValueError("Best model not found. Please check if the model has been saved.")

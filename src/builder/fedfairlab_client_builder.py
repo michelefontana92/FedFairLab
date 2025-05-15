@@ -69,11 +69,13 @@ class FedFairLabBuilder(Base_Builder):
 
         common_params['num_global_iterations'] = kwargs.get('num_global_iterations')
         common_params['num_local_iterations'] = kwargs.get('num_local_iterations')
+        common_params['num_personalization_iterations'] = kwargs.get('num_personalization_iterations')
         
         common_params['performance_constraint'] = kwargs.get('performance_constraint')
         common_params['delta'] = kwargs.get('delta', 0.2)
         common_params['max_constraints_in_subproblem'] = kwargs.get('max_constraints_in_subproblem')
         common_params['global_patience'] = kwargs.get('global_patience')
+        common_params['local_patience'] = kwargs.get('local_patience')
         print('Groups: ', common_params['groups_list'])
         # Callbacks
         
@@ -138,10 +140,19 @@ class FedFairLabBuilder(Base_Builder):
         checkpoint_name = kwargs.get('checkpoint_name', f'{client_name}_local.h5')
         client_params['checkpoint_name'] = checkpoint_name   
         client_params['callbacks'] = [
-            EarlyStopping(patience=client_params['global_patience'], monitor=client_params['monitor'], mode=client_params['mode']),
+            EarlyStopping(patience=client_params['local_patience'], monitor=client_params['monitor'], mode=client_params['mode']),
             ModelCheckpoint(save_dir=client_params['checkpoint_dir'], save_name=kwargs.get('checkpoint_name', checkpoint_name), 
                                                                                            monitor=client_params['monitor'], mode=client_params['mode'])
         ]
+
+        client_params['client_checkpoint_name'] = kwargs.get('client_checkpoint_name', f'{client_name}_local_final.h5')  
+        client_params['client_callbacks'] = [
+            ModelCheckpoint(save_dir=client_params['checkpoint_dir'], 
+                            save_name=client_params['client_checkpoint_name'], 
+                            monitor=client_params['monitor'],
+                            mode=client_params['mode'])
+        ]
+
 
        
         
@@ -226,7 +237,8 @@ class FedFairLabBuilder(Base_Builder):
                     model = client_params['model'],
                     num_global_iterations = client_params['num_global_iterations'],
                     num_local_iterations = client_params['num_local_iterations'],
-                    
+                    client_callbacks = client_params['client_callbacks'],
+                    num_personalization_iterations = client_params['num_personalization_iterations'],
                     #config = client_params
             )
         elif self.algorithm=='fedavg':

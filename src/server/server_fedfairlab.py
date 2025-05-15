@@ -52,16 +52,16 @@ class ServerFedFairLab(BaseServer):
         self.model = kwargs.get('model')
         self.loss = kwargs.get('loss')
         self.metrics = kwargs.get('metrics')
-        self.config = kwargs.get('server_config')
         self.log_model = kwargs.get('log_model', False)
         self.project = kwargs.get('project_name', 'fedfairlab')
         self.id = kwargs.get('server_name', 'server')
         self.checkpoint_dir = kwargs.get('checkpoint_dir','checkpoints')
         self.checkpoint_name = kwargs.get('checkpoint_name','global_model.h5')
-        
+        self.patience = kwargs.get('server_patience', 5)
         self.verbose = kwargs.get('verbose', False)
         self.num_federated_iterations = kwargs.get('num_federated_iterations', 1)
-
+        
+        
         self.original_metrics_list = kwargs.get('metrics_list')
         self.original_groups_list = kwargs.get('groups_list')
         self.original_threshold_list = kwargs.get('threshold_list')
@@ -69,7 +69,7 @@ class ServerFedFairLab(BaseServer):
         self.performance_constraint = kwargs.get('performance_constraint')
         self.history_global=[]
         self.callbacks = [
-            EarlyStopping(patience=self.config['early_stopping_patience'],
+            EarlyStopping(patience=self.patience,
                           monitor='val_global_score',
                           mode='min'
                           ),
@@ -134,7 +134,8 @@ class ServerFedFairLab(BaseServer):
         return params_list[selected]['params'],params_list[argmin]['params'],scores[argmin].item(),argmin
 
     def aggregation_phase(self,**kwargs):
-        aggregation_epochs = 1#kwargs.get('aggregation_epochs',5)
+        aggregation_epochs = 1 #kwargs.get('aggregation_epochs',5)
+        num_aggregation_local_epochs = 5
         params = kwargs.get('params')
         model_params_list=[p['params'] for p in params]
         assert len(model_params_list) > 0, "Model parameters are required"
@@ -142,7 +143,9 @@ class ServerFedFairLab(BaseServer):
         results = self._broadcast_fn('evaluate_constraints_list',
                                      model_params_list=copy.deepcopy(model_params_list),
                             problem=self.global_problem,
-                            first_performance_constraint=self.performance_constraint<1.0)
+                            first_performance_constraint=self.performance_constraint<1.0,
+                            performance_constraint=self.performance_constraint,
+                            original_threshold_list=self.original_threshold_list)
         #for r in results:
         #    print('Results of eval: ',r)
         b = [list(group) for group in zip(*results)]
@@ -198,7 +201,9 @@ class ServerFedFairLab(BaseServer):
             for _,client in enumerate(self.clients):
                 handlers.append(getattr(client,'fit').remote(
                     model_params=copy.deepcopy(aggregated_model_params),
-                            problem=current_aggregation_problem))
+                            problem=current_aggregation_problem,
+                            num_local_epochs=num_aggregation_local_epochs
+                            ))
             
             for handler in handlers:
                 aggregation_results.append(ray.get(handler))
@@ -207,7 +212,9 @@ class ServerFedFairLab(BaseServer):
             eval_results = self._broadcast_fn('evaluate_constraints_list',
                                         model_params_list=copy.deepcopy(aggregated_models_list),
                                 problem=self.global_problem,
-                                first_performance_constraint=self.performance_constraint<1.0)
+                                first_performance_constraint=self.performance_constraint<1.0,
+                                performance_constraint=self.performance_constraint,
+                                original_threshold_list=self.original_threshold_list)
             
             b = [list(group) for group in zip(*eval_results)]
             global_aggregation_scores = []
@@ -309,7 +316,9 @@ class ServerFedFairLab(BaseServer):
         results = self._broadcast_fn('evaluate_constraints',
                             model_params=copy.deepcopy(model_params),
                             problem=self.global_problem,
-                            first_performance_constraint=self.performance_constraint<1.0)
+                            first_performance_constraint=self.performance_constraint<1.0,
+                            performance_constraint=self.performance_constraint,
+                            original_threshold_list=self.original_threshold_list)
         #print('Length of global results:',len(results))  
         global_scores = compute_global_score(
             performance_constraint=self.performance_constraint,
@@ -381,6 +390,7 @@ class ServerFedFairLab(BaseServer):
 
 
         problem = {
+            'name': 'local_problem',
             'original_objective_function': original_objective_function,
             'objective_function': objective_function,
             'batch_objective_function': batch_objective_function,
@@ -404,6 +414,7 @@ class ServerFedFairLab(BaseServer):
         batch_objective_function = SurrogateFactory.create(name='adaptive_aggregation_f1_8', surrogate_name='cross_entropy', weight=1, average='weighted')
         
         problem = {
+            'name': 'aggregation_problem',
             'original_objective_function': original_objective_function,
             'objective_function': objective_function,
             'batch_objective_function': batch_objective_function,
@@ -466,6 +477,7 @@ class ServerFedFairLab(BaseServer):
 
 
         problem = {
+            'name': 'global_problem',
             'original_objective_function': original_objective_function,
             'objective_function': objective_function,
             'batch_objective_function': batch_objective_function,
@@ -591,6 +603,13 @@ class ServerFedFairLab(BaseServer):
         
         return teachers  
     
+    def save(self,metrics,path):
+        result_to_save = {
+            'model_params': self.model.state_dict(),
+            'metrics': metrics
+        }
+        torch.save(result_to_save, path)
+    
     def step(self,**kwargs):
         handlers = []
         results = []
@@ -610,7 +629,7 @@ class ServerFedFairLab(BaseServer):
             #    problem['aggregation_teachers_list'] = [copy.deepcopy(self.global_model.state_dict())]
             current_problem = copy.deepcopy(self.problem)
             if not self.first_round:
-                current_problem['aggregation_teachers_list'] = [copy.deepcopy(self.model.state_dict())] + [copy.deepcopy(g['params']) for g in self.history_global]
+                current_problem['aggregation_teachers_list'] = [copy.deepcopy(self.model.state_dict())]+[copy.deepcopy(g['params']) for g in self.history_global]
                 handlers.append(getattr(client,'fit').remote(model_params=copy.deepcopy(self.history[i]),
                            problem=current_problem))
             else:
@@ -646,7 +665,8 @@ class ServerFedFairLab(BaseServer):
         self.history_global.append({'params':aggregated_model_params,
                                     'score':(1-global_eval['metrics']['val_global_score'])*100,
                                     })
-        self.history_global = self.history_global[-5:]
+        self.history_global.sort(key=lambda x: x['score'],reverse=True)
+        self.history_global = self.history_global[:5]
         #global_eval = self.evaluate(model_params=self.model.state_dict())
          
         try:
@@ -658,8 +678,11 @@ class ServerFedFairLab(BaseServer):
                         self.logger.log(global_eval)  
                         raise EarlyStoppingException  
                 elif isinstance(callback,ModelCheckpoint):
-                    model_checkpoint=callback(save_fn=partial(torch.save, self.model.state_dict()),
-                            metrics = global_eval['metrics'])
+                    model_checkpoint = callback(save_fn=partial(self.save,
+                                                              global_eval['metrics']),
+                                                metrics = global_eval['metrics']
+                                                )
+                            
                     global_eval['metrics']['global_checkpoint'] = 1 if model_checkpoint else 0
                     self.global_model = copy.deepcopy(self.model)
             self.logger.log(global_eval['metrics'])
@@ -667,7 +690,35 @@ class ServerFedFairLab(BaseServer):
         
         except EarlyStoppingException:
             raise EarlyStoppingException 
-                
+
+    def personalization_phase(self,**kwargs):
+        #print('Personalization phase')
+        #print('Checkpoint path:',self.checkpoint_path)
+        handlers = []
+        for callback in self.callbacks:
+          if isinstance(callback, ModelCheckpoint):
+            best_results = callback.get_best_model()  
+        global_model_params = best_results['model_params']
+        current_problem = copy.deepcopy(self.problem)
+        current_problem['aggregation_teachers_list'] = [global_model_params]#[h['params'] for h in self.history_global]
+        self._broadcast_fn('personalize',
+                           model_params=global_model_params,
+                           problem=current_problem,
+                           first_performance_constraint=self.performance_constraint<1.0,
+                           performance_constraint=self.performance_constraint,
+                           original_threshold_list=self.original_threshold_list)
+        
+        return          
+    
+    def log_final_results(self,**kwargs):
+        for callback in self.callbacks:
+          if isinstance(callback, ModelCheckpoint):
+            best_results = callback.get_best_model()  
+        metrics = best_results['metrics']
+        final_scores = {}
+        for key,v in metrics.items():
+            final_scores[f'final_{key}'] = v
+        self.logger.log(final_scores)
     def execute(self,**kwargs):
         self.first_round = True
         global_eval = self.evaluate(model_params=self.model.state_dict())
@@ -691,19 +742,21 @@ class ServerFedFairLab(BaseServer):
                 self.step(round=i)
         except EarlyStoppingException:
             pass
-        #self.fine_tune()
+        print('End of the global rounds')
+        print('Starting the personalization phase')
+        self.personalization_phase()
+        print('End of the personalization phase')
 
-   
-    
     def fine_tune(self,**kwargs):
+        handlers = []
         if os.path.exists(self.checkpoint_path):
             global_model = torch.load(self.checkpoint_path)
             self.model.load_state_dict(global_model)
+        
         self._broadcast_fn('fine_tune',global_model=self.model)
         return
     
     def shutdown(self,**kwargs):
-        if os.path.exists(self.checkpoint_path):
-            self._evaluate_best_model()
+        self.log_final_results()
         self.logger.close()
         self._broadcast_fn('shutdown')
