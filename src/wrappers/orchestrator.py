@@ -554,15 +554,15 @@ class SubProblemConfig:
         self.checkpoints = [
                 EarlyStopping(patience=5, 
                             monitor='val_constraints_score', 
-                            mode='min'),
+                            mode='max'),
                 ModelCheckpoint(save_dir=f"{self.checkpoints_config['checkpoint_dir']}/subproblem_{self.id}", 
                                 save_name=f"{self.checkpoints_config['checkpoint_name']}", 
                                 monitor='val_constraints_score', 
-                                mode='min')
+                                mode='max')
             ]
         
         self.lagrangian_checkpoints = [EarlyStopping(patience=2, 
-                            monitor='score', 
+                            monitor='violations', 
                             mode='min') for _ in range(len(self.current_inequality_constraints))]
     
     def add_local_proximity_constraint(self,teacher_idx,group_name,group_id,delta,new_macro_constraint):

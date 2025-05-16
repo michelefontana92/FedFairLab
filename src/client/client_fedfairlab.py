@@ -99,7 +99,7 @@ class ClientFedFairLab(BaseClient):
         eval_results = kwargs.get('eval_results')
         
         best_results = {}
-        best_score = np.inf
+        best_score = -np.inf
         best_model_params = None
         for model,result in zip(model_params_list,eval_results):
             local_result = compute_global_score(
@@ -109,7 +109,7 @@ class ClientFedFairLab(BaseClient):
             )
              
             local_result['metrics']['val_constraints_score'] = local_result['metrics']['val_global_score']
-            if local_result['metrics']['val_constraints_score'] < best_score:
+            if local_result['metrics']['val_constraints_score'] > best_score:
                 best_score = local_result['metrics']['val_constraints_score']
                 best_results = copy.deepcopy(local_result)
                 best_model_params = model
@@ -120,6 +120,7 @@ class ClientFedFairLab(BaseClient):
         
         #print(f'[CLIENT {self.client_name}] Best LOCAL Evaluation results: {best_results}')
         self.model = copy.deepcopy(best_model_params)
+        #print(f'[CLIENT {self.client_name}] Best LOCAL Evaluation results: {best_results["metrics"]}')
         metrics = best_results['metrics']
         for checkpoint in self.client_checkpoints:
             if isinstance(checkpoint,ModelCheckpoint):
@@ -169,6 +170,7 @@ class ClientFedFairLab(BaseClient):
             if v not in ['val_constraints']:
                 final_results[v] = results_dict[v]
         if problem_name == 'global_problem':
+            #print(f'[CLIENT {self.client_name}] Evaluation results: {final_results}')
             self._eval_and_log(
                     performance_constraint=performance_constraint,
                     original_threshold_list=original_threshold_list,
@@ -181,17 +183,19 @@ class ClientFedFairLab(BaseClient):
         checkpoint = self.client_checkpoints[0]
         assert isinstance(checkpoint,ModelCheckpoint), "Checkpoint must be an instance of ModelCheckpoint"
         best_results = self.load(checkpoint.get_model_path())
+        file_path = checkpoint.get_model_path()
         best_metrics = best_results['metrics']
         best_model_params = best_results['model_state_dict']
-        return best_model_params,best_metrics
+        return best_model_params,best_metrics,file_path
     
     
     def _log_final_results(self,**kwargs):
-        _,metrics = self._get_final_results(**kwargs)
+        _,metrics,path = self._get_final_results(**kwargs)
         final_results = {}
         for key,v in metrics.items():
             final_results[f'final_{key}'] = v
         self.logger.log(final_results)
+        self.logger.log_artifact(f'{self.client_name}_local_model',path)
     
     #@profile 
     def evaluate_constraints_list(self,**kwargs):
@@ -246,7 +250,7 @@ class ClientFedFairLab(BaseClient):
     
     def personalize(self,**kwargs):
         problem = copy.deepcopy(kwargs.get('problem'))
-        best_local_model_params,_ = self._get_final_results(**kwargs)
+        best_local_model_params,_,_= self._get_final_results(**kwargs)
         problem['aggregation_teachers_list'] += [best_local_model_params]
         kwargs['problem'] = copy.deepcopy(problem)
         kwargs['num_local_epochs'] = self.num_personalization_epochs

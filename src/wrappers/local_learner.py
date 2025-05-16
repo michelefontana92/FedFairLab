@@ -193,7 +193,7 @@ class LocalLearner(TorchNNWrapper):
             if isinstance(checkpoint, EarlyStopping):
                 if i < n_inequality_constraints:
                     if i not in cached_scores:
-                        cached_scores[i] = {'score': inequality_constraints[i]}
+                        cached_scores[i] = {'violations': inequality_constraints[i]}
                     update, _ = checkpoint(metrics=cached_scores[i])
                     if not update:
                         self.inequality_mask[i] = 0  # Ferma l'aggiornamento per questo vincolo
@@ -202,7 +202,7 @@ class LocalLearner(TorchNNWrapper):
                 else:
                     eq_index = i - n_inequality_constraints
                     if eq_index not in cached_scores:
-                        cached_scores[eq_index] = {'score': equality_constraints[eq_index]}
+                        cached_scores[eq_index] = {'violations': equality_constraints[eq_index]}
                     update, _ = checkpoint(metrics=cached_scores[eq_index])
                     if not update:
                         self.equality_mask[eq_index] = 0  # Ferma l'aggiornamento per questo vincolo
@@ -235,7 +235,7 @@ class LocalLearner(TorchNNWrapper):
         equality_constraints = kwargs.get('equality_constraints')
         #print('Original_objective function',objective_function.item())
         # Inizializza lo score con la funzione obiettivo
-        score = objective_function.clone()
+        score = 1-objective_function.clone()
         
         # Inizializza una variabile per il conteggio delle violazioni dei vincoli
         total_penalty = 0
@@ -249,7 +249,7 @@ class LocalLearner(TorchNNWrapper):
         if len(equality_constraints)> 0:
             equality_penalty = torch.max(torch.abs(equality_constraints))
             total_penalty += equality_penalty * self.gamma_constraint
-        score += total_penalty
+        score -= total_penalty
         #if total_penalty > 0:
         #    print('Total Penalty:',total_penalty)
         #print('Total Penalty:',total_penalty)
@@ -733,9 +733,11 @@ class LocalLearner(TorchNNWrapper):
                                 raise EarlyStoppingException
 
                         elif isinstance(checkpoint, ModelCheckpoint):
+                           
                             model_checkpoint = checkpoint(save_fn=self.save, metrics=metrics)
                             metrics['model_checkpoint'] = 1 if model_checkpoint else 0
-                           
+                            
+
                     if not disable_log:
                         self.logger.log(metrics)
                     

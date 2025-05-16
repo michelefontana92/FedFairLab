@@ -21,12 +21,12 @@ def average_dictionary_list(dictionary_list):
         result[k] /= len(dictionary_list)
     return result
 
-def scoring_function(results,use_training=False,weight_constraint=100):
+def scoring_function(results,use_training=False,weight_constraint=1):
     prefix = 'train' if use_training else 'val'
-    score = results[f'{prefix}_objective_fn']
+    score = 1- results[f'{prefix}_objective_fn']
     
     for constraint in results[f'{prefix}_constraints']:
-        score += constraint*weight_constraint
+        score -= constraint*weight_constraint
     return score
 
 def collect_local_results(**kwargs):

@@ -68,20 +68,23 @@ class ServerFedFairLab(BaseServer):
         self.sensitive_attributes = kwargs.get('sensitive_attributes')
         self.performance_constraint = kwargs.get('performance_constraint')
         self.history_global=[]
+        
+        
         self.callbacks = [
             EarlyStopping(patience=self.patience,
                           monitor='val_global_score',
-                          mode='min'
+                          mode='max'
                           ),
             ModelCheckpoint(save_dir=self.checkpoint_dir,
                             save_name = self.checkpoint_name,
                             monitor='val_global_score',
-                            mode='min')
+                            mode='max')
                           ]
+        
         
         self.logger = WandbLogger(
             project=self.project,
-            config= self.config,
+            config= None,
             id=self.id,
             checkpoint_dir= self.checkpoint_dir,
             checkpoint_path = self.checkpoint_name,
@@ -135,7 +138,7 @@ class ServerFedFairLab(BaseServer):
 
     def aggregation_phase(self,**kwargs):
         aggregation_epochs = 1 #kwargs.get('aggregation_epochs',5)
-        num_aggregation_local_epochs = 5
+        num_aggregation_local_epochs = 3
         params = kwargs.get('params')
         model_params_list=[p['params'] for p in params]
         assert len(model_params_list) > 0, "Model parameters are required"
@@ -161,13 +164,13 @@ class ServerFedFairLab(BaseServer):
                 eval_results=br)
             #print('Scores:',scores)
             original_scores.append(scores['metrics']['val_global_score'])
-            global_scores.append((1-scores['metrics']['val_global_score'])*100)
+            global_scores.append((scores['metrics']['val_global_score'])*10)
             model_eval_list.append(scores)
         
         #global_scores += [h['score'] for h in self.history_global]
         #model_params_list += [h['params'] for h in self.history_global]
 
-       
+        print('Setting scores for aggregation problem: ',global_scores)
         current_aggregation_problem = copy.deepcopy(self.aggregation_problem)
         current_aggregation_problem['aggregation_teachers_list'] = model_params_list 
         current_aggregation_problem['objective_function'].set_weights(global_scores)
@@ -193,7 +196,7 @@ class ServerFedFairLab(BaseServer):
         
         
         aggregated_model_params = copy.deepcopy(self.model.state_dict())
-        aggregated_model_score = np.infty 
+        aggregated_model_score = -np.infty 
         
         for _ in range(aggregation_epochs):
             aggregation_results = []
@@ -239,13 +242,13 @@ class ServerFedFairLab(BaseServer):
             """
             #print('Global aggregation scores:',global_aggregation_scores[0])
             global_aggregation_scores = torch.tensor(global_aggregation_scores)
-            sorted_global_aggregation_scores = torch.argsort(global_aggregation_scores)
+            sorted_global_aggregation_scores = torch.argsort(global_aggregation_scores,descending=True)
             selected = sorted_global_aggregation_scores[0].item()
             selected_score = global_aggregation_scores[selected].item()
             aggregated_model_params = aggregated_models_list[selected]
             print('Scores of aggregated models:',global_aggregation_scores)
             #print('Selected model:',selected)
-            if selected_score < aggregated_model_score:
+            if selected_score > aggregated_model_score:
                 aggregated_model_score = selected_score
                 candidate_model_params = copy.deepcopy(aggregated_models_list[selected])
                 
@@ -253,12 +256,12 @@ class ServerFedFairLab(BaseServer):
         print('Final aggregated model score: ',aggregated_model_score)
         
         global_eval = self.evaluate(model_params=candidate_model_params)
-        print('Ensemble model score: ',(1-global_eval['metrics']['val_global_score'])*100)
-        if global_eval['metrics']['val_global_score'] < final_aggregated_model_score:
+        print('Ensemble model score: ',(global_eval['metrics']['val_global_score'])*10)
+        if global_eval['metrics']['val_global_score'] > final_aggregated_model_score:
             final_aggregated_model_params = copy.deepcopy(candidate_model_params)
             final_aggregated_model_score = global_eval['metrics']['val_global_score']
             final_aggregated_model_eval = global_eval
-        print('Final global model score: ',(1-final_aggregated_model_score)*100)
+        print('Final global model score: ',(final_aggregated_model_score)*10)
         print('End of the aggregation')
         #final_aggregated_model_params = copy.deepcopy(final_aggregated_model_params)
         return final_aggregated_model_params,final_aggregated_model_eval
@@ -629,7 +632,7 @@ class ServerFedFairLab(BaseServer):
             #    problem['aggregation_teachers_list'] = [copy.deepcopy(self.global_model.state_dict())]
             current_problem = copy.deepcopy(self.problem)
             if not self.first_round:
-                current_problem['aggregation_teachers_list'] = [copy.deepcopy(self.model.state_dict())]+[copy.deepcopy(g['params']) for g in self.history_global]
+                current_problem['aggregation_teachers_list'] = [copy.deepcopy(g['params']) for g in self.history_global] + [copy.deepcopy(self.model.state_dict())]
                 handlers.append(getattr(client,'fit').remote(model_params=copy.deepcopy(self.history[i]),
                            problem=current_problem))
             else:
@@ -663,7 +666,7 @@ class ServerFedFairLab(BaseServer):
         #self.problem['aggregation_teachers_list'] = [res['params'] for res in results]
         self.model.load_state_dict(aggregated_model_params)
         self.history_global.append({'params':aggregated_model_params,
-                                    'score':(1-global_eval['metrics']['val_global_score'])*100,
+                                    'score':(global_eval['metrics']['val_global_score'])*10,
                                     })
         self.history_global.sort(key=lambda x: x['score'],reverse=True)
         self.history_global = self.history_global[:5]
@@ -713,7 +716,12 @@ class ServerFedFairLab(BaseServer):
     def log_final_results(self,**kwargs):
         for callback in self.callbacks:
           if isinstance(callback, ModelCheckpoint):
-            best_results = callback.get_best_model()  
+            best_results = callback.get_best_model() 
+            artifact_name = 'global_model'
+            artifact_path = callback.get_model_path()
+            self.logger.log_artifact(artifact_name,
+                                     artifact_path)
+             
         metrics = best_results['metrics']
         final_scores = {}
         for key,v in metrics.items():
@@ -758,5 +766,6 @@ class ServerFedFairLab(BaseServer):
     
     def shutdown(self,**kwargs):
         self.log_final_results()
+        
         self.logger.close()
         self._broadcast_fn('shutdown')

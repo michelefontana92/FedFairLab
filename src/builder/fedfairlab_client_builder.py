@@ -64,9 +64,10 @@ class FedFairLabBuilder(Base_Builder):
         common_params['optimizer_fn'] = partial(Adam, lr=common_params['lr'])
         
         common_params['monitor'] = kwargs.get('monitor', 'val_constraints_score')
-        common_params['mode'] = kwargs.get('mode', 'min')
+        common_params['mode'] = kwargs.get('mode', 'max')
+        
+        
         common_params['log_model'] = kwargs.get('log_model', False)
-
         common_params['num_global_iterations'] = kwargs.get('num_global_iterations')
         common_params['num_local_iterations'] = kwargs.get('num_local_iterations')
         common_params['num_personalization_iterations'] = kwargs.get('num_personalization_iterations')
@@ -97,7 +98,9 @@ class FedFairLabBuilder(Base_Builder):
                                     weight=1, average='weighted', 
                                     upper_bound=common_params['performance_constraint'],
                                     use_max=True)]
-            common_params['lagrangian_callbacks'] = [EarlyStopping(patience=2, monitor='score', mode='min')]
+            common_params['lagrangian_callbacks'] = [EarlyStopping(patience=2, 
+                                                                   monitor='score', 
+                                                                   mode='max')]
             common_params['macro_constraints_list'] = [[0]]
             common_params['shared_macro_constraints'] = [0]
           

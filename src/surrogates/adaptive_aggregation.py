@@ -724,7 +724,7 @@ class AdaptiveAggregationF1Surrogate8:
 
         #raw_weights = torch.tensor(self.weights_list, dtype=torch.float32, device=teacher_logits_list[0].device)
         weights_tensor = torch.softmax(raw_weights / self.temperature, dim=0)
-
+        #print('Weights tensor:', weights_tensor)
         if isinstance(teacher_logits_list, torch.Tensor):
             stacked_logits = teacher_logits_list  # già [T, B, C]
         else:

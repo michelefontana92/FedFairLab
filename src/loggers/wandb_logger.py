@@ -85,6 +85,11 @@ class WandbLogger(BaseLogger):
     def debug(self, message):
         self.file_logger.log(f'[DEBUG] {message}')
     
+    def log_artifact(self, name,path):
+        artifact = wandb.Artifact(name, type="model")
+        artifact.add_file(path)
+        wandb.log_artifact(artifact)
+        
     def close(self):
         if self.data_module is not None:
             with open('data.pkl', 'wb') as f:
