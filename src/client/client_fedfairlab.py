@@ -39,6 +39,8 @@ class ClientFedFairLab(BaseClient):
         self.client_checkpoints = kwargs.get('client_callbacks')
         assert self.local_model is not None, "Model is required"
         self.state = None
+        
+        
         print(f"Client {self.client_name} initialized")
        
     
@@ -64,18 +66,29 @@ class ClientFedFairLab(BaseClient):
         num_global_epochs = kwargs.get('num_global_epochs',self.num_global_epochs)
         #if num_local_epochs != self.num_local_epochs:
         #    print(f"Client {self.client_name} num_local_epochs: {num_local_epochs}")
+        problem = kwargs.get('problem')
+        #constraint = problem['inequality_constraints'][1]
+        #print(f"Client {self.client_name} constraint lower bound: {constraint.lower_bound}")
+        problem_name = problem['name']
         self._init_orchestrator(**kwargs)
         #if self.state is not None:
         #    self.orchestrator.set_state(self.state)
-        model_params = kwargs.get('model_params')
-        self.state = {'model_state_dict': model_params}
         
+        #model_params = kwargs.get('model_params')
+        #self.orchestrator.set_model_params(model_params)
+
+        current_state = self.state if problem_name == 'local_problem' else None
         updated_model,state=self.orchestrator.fit(num_global_iterations=num_global_epochs,
                                             num_local_epochs=num_local_epochs,
-                                            state=self.state)
-        self.state = state
+                                            state=current_state)
+        
+        if problem_name == 'local_problem':
+            self.state = copy.deepcopy(state)
+            #print(f"Client {self.client_name} state: {self.state['inequality_lambdas']}")
+        #print(f'Client {self.client_name} new state: {self.state}')
         return {'params':copy.deepcopy(updated_model.state_dict()),
-                'weight':1.0}
+                'weight':1.0
+                }
     
     def update(self,**kwargs):
         pass
@@ -97,7 +110,9 @@ class ClientFedFairLab(BaseClient):
         original_threshold_list = kwargs.get('original_threshold_list')
         model_params_list = kwargs.get('model_params_list')
         eval_results = kwargs.get('eval_results')
-        
+        #print(f'[CLIENT {self.client_name}] performance_constraint: {performance_constraint}')
+        #print(f'[CLIENT {self.client_name}] original_threshold_list: {original_threshold_list}')
+        #print(f'[CLIENT {self.client_name}] eval_results: {eval_results}')
         best_results = {}
         best_score = -np.inf
         best_model_params = None
@@ -107,15 +122,17 @@ class ClientFedFairLab(BaseClient):
                 original_threshold_list=original_threshold_list,
                 eval_results=[result],
             )
-             
+            #print(f'[CLIENT {self.client_name}] Input LOCAL Evaluation results: {result}') 
             local_result['metrics']['val_constraints_score'] = local_result['metrics']['val_global_score']
+            del local_result['metrics']['val_global_score']
             if local_result['metrics']['val_constraints_score'] > best_score:
                 best_score = local_result['metrics']['val_constraints_score']
                 best_results = copy.deepcopy(local_result)
                 best_model_params = model
-            del local_result['metrics']['val_global_score']
             #print(f'[CLIENT {self.client_name}] LOCAL Evaluation results: {local_result}')
-        
+            
+            #print(f'[CLIENT {self.client_name}] LOCAL Evaluation results: {local_result}')
+            
             #print(f'[CLIENT {self.client_name}] LOCAL Evaluation results: {result["metrics"]}\n{result["metrics"]["val_constraints_score"]}')
         
         #print(f'[CLIENT {self.client_name}] Best LOCAL Evaluation results: {best_results}')
@@ -148,6 +165,7 @@ class ClientFedFairLab(BaseClient):
     def evaluate_constraints(self,**kwargs):
         self._init_orchestrator(**kwargs)
         model_params = kwargs.get('model_params')
+        log_results = kwargs.get('log_results',True)
         performance_constraint = kwargs.get('performance_constraint')
         original_threshold_list = kwargs.get('original_threshold_list')
         problem = kwargs.get('problem')
@@ -171,7 +189,8 @@ class ClientFedFairLab(BaseClient):
                 final_results[v] = results_dict[v]
         if problem_name == 'global_problem':
             #print(f'[CLIENT {self.client_name}] Evaluation results: {final_results}')
-            self._eval_and_log(
+            if log_results:
+                self._eval_and_log(
                     performance_constraint=performance_constraint,
                     original_threshold_list=original_threshold_list,
                     model_params_list=[model_params],
@@ -200,6 +219,7 @@ class ClientFedFairLab(BaseClient):
     #@profile 
     def evaluate_constraints_list(self,**kwargs):
         self._init_orchestrator(**kwargs)
+        log_results = kwargs.get('log_results',True)
         problem = kwargs.get('problem')
         problem_name = problem['name']
         model_params_list = kwargs.get('model_params_list')
@@ -232,12 +252,13 @@ class ClientFedFairLab(BaseClient):
             
             results.append(final_results)
         if problem_name == 'global_problem':
-            self._eval_and_log(
-                    performance_constraint=performance_constraint,
-                    original_threshold_list=original_threshold_list,
-                    model_params_list=model_params_list,
-                    eval_results=results,
-                )           
+            if log_results:
+                self._eval_and_log(
+                        performance_constraint=performance_constraint,
+                        original_threshold_list=original_threshold_list,
+                        model_params_list=model_params_list,
+                        eval_results=results,
+                    )           
 
 
 
@@ -249,13 +270,19 @@ class ClientFedFairLab(BaseClient):
         return results
     
     def personalize(self,**kwargs):
-        problem = copy.deepcopy(kwargs.get('problem'))
+        #problem = copy.deepcopy(kwargs.get('problem'))
+        #best_local_model_params,_,_= self._get_final_results(**kwargs)
+        #problem['aggregation_teachers_list'] += [best_local_model_params]
+        #kwargs['problem'] = copy.deepcopy(problem)
+        log_results = kwargs.get('log_results',True)
         best_local_model_params,_,_= self._get_final_results(**kwargs)
-        problem['aggregation_teachers_list'] += [best_local_model_params]
-        kwargs['problem'] = copy.deepcopy(problem)
-        kwargs['num_local_epochs'] = self.num_personalization_epochs
+        kwargs['num_local_epochs'] = 10
+        kwargs['num_global_epochs'] = 100
+        kwargs['model_params'] = copy.deepcopy(best_local_model_params)
+        self.state = None
         personalized_results_dict = self.fit(**kwargs)
         personalized_model_params = personalized_results_dict['params']
+        
         results_dict = self.orchestrator.evaluate_constraints2(personalized_model_params)
         #print(f'[CLIENT {self.client_name}] Evaluation personalized results: {results_dict}')
         
@@ -264,11 +291,14 @@ class ClientFedFairLab(BaseClient):
             if isinstance(checkpoint,ModelCheckpoint):
                 model_checkpoint = checkpoint(save_fn=partial(self.save,metrics), metrics=metrics)
                 metrics['model_checkpoint'] = 1 if model_checkpoint else 0
-        self.logger.log(metrics)
-        
+        if log_results:
+            self.logger.log(metrics)
+       
     
     def shutdown(self,**kwargs):
-        self._log_final_results(**kwargs)
+        log_results = kwargs.get('log_results',True)
+        if log_results:
+            self._log_final_results(**kwargs)
         self.logger.close()
 
     def fine_tune(self, **kwargs):

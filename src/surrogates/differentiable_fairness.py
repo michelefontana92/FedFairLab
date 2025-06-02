@@ -19,7 +19,7 @@ class DifferentiableDemographicParitySurrogate:
         assert self.lower_bound is not None, 'lower_bound must be provided'
         assert self.target_groups is not None, 'target_groups must be provided'
         #print('Demographic Parity Surrogate on group:', self.group_name)
-        
+    
     def __call__(self, **kwargs):
         probabilities = kwargs.get('probabilities')
         assert probabilities is not None, 'probabilities must be provided'
@@ -38,11 +38,11 @@ class DifferentiableDemographicParitySurrogate:
             target_groups=self.target_groups.to(self.device),
             multiclass=self.multiclass
         )
-        
-        # Controlla NaN in dp
-        if torch.isnan(dp).any():
-            print('Demographic parity contiene NaN!')
-            raise ValueError('Demographic parity contiene NaN!')
+
+        if dp is None:
+            # Gruppo mancante: non includere vincolo
+            return torch.tensor(0.0, device=probabilities.device)
+
         
         
         if self.use_max:
@@ -50,8 +50,6 @@ class DifferentiableDemographicParitySurrogate:
             return torch.max(torch.zeros_like(dp), dp - self.lower_bound)
         #print(f'Demographic Parity on group {self.group_name} = {dp}')
         return dp - self.lower_bound
-
-
 @register_surrogate('diff_equal_opportunity')
 class DifferentiableEqualOpportunitySurrogate:
     def __init__(self,**kwargs) -> None:

@@ -157,9 +157,12 @@ class BaseDataset(Dataset):
         s = {}
         group_ids = {}
         weights = {}
-        for group_name,_ in self.sensitive_attributes:
+        for group_name, _ in self.sensitive_attributes:
             s[group_name] = data[f'group_id_{group_name}'].values.ravel()
-            group_ids[group_name] = torch.tensor([i for i in list(data[f'group_id_{group_name}'].unique())]).view(1,-1)
+            # Ottieni tutti i group_id teorici da self.id_to_combination_dict
+            all_group_ids = list(self.id_to_combination_dict[group_name].keys())
+            group_ids[group_name] = torch.tensor(all_group_ids).view(1, -1)
+
             if self.use_local_weights:
                 weights[group_name] = data[f'local_weights_{group_name}'].values.ravel() 
         
@@ -168,6 +171,9 @@ class BaseDataset(Dataset):
             print(f"Group ids of {name}:\n {group_ids[name]}")
        
         return X, y, s,group_ids,weights
+    
+    def get_group_ids(self):
+        return self.group_ids
     
     def _compute_class_weight(self,data:pd.DataFrame):
         return torch.tensor(compute_class_weight('balanced',
@@ -197,6 +203,7 @@ class BaseDataset(Dataset):
                     groups_ids_unique = self.group_ids,
                     positive_mask = self.positive_mask[index],
                     groups_ids_list = self.group_ids,
+                    index=index
                     )
        
         if self.use_local_weights:

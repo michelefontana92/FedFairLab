@@ -21,7 +21,7 @@ def average_dictionary_list(dictionary_list):
         result[k] /= len(dictionary_list)
     return result
 
-def scoring_function(results,use_training=False,weight_constraint=1):
+def scoring_function(results,use_training=False,weight_constraint=10):
     prefix = 'train' if use_training else 'val'
     score = 1- results[f'{prefix}_objective_fn']
     

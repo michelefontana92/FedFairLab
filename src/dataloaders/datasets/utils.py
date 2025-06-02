@@ -15,43 +15,37 @@ def _assign(x,sensitive_dict,key):
         #print(f'Assigned NoneGroup to {x}')
         return 'NoneGroup'
 
-
 import itertools
 
 def assign_group_id(df, sensitive_attributes):
     """
-    Assegna un identificatore di gruppo a ciascuna riga di un DataFrame in base a combinazioni di colonne specificate.
-    
-    Parametri:
-    df (pd.DataFrame): DataFrame di input con colonne da combinare.
-    group_dict (dict): Dizionario che contiene le colonne e i valori possibili da combinare.
-    
+    Federated-safe assignment: assegna ID consistenti tra client.
     Ritorna:
-    tuple: Una tupla contenente:
-        - pd.DataFrame: DataFrame con una nuova colonna 'GroupID'.
-        - dict: Dizionario che mappa gli ID di gruppo alle combinazioni di attributi.
+        - df con colonne group_id_<name>
+        - dizionario globale id_to_combination per ciascun gruppo
     """
-    id_to_combination={}
-    for (name,group_dict) in sensitive_attributes:
-        # Ottieni i nomi delle colonne e i valori possibili per ciascuna colonna
+    id_to_combination = {}
+
+    for (name, group_dict) in sensitive_attributes:
         columns = list(group_dict.keys())
         values = [group_dict[col] for col in columns]
+        combinations = list(itertools.product(*values))  # deterministico e ordinato
+        combination_ids = {tuple(comb): idx for idx, comb in enumerate(combinations)}
 
-        # Genera tutte le combinazioni possibili e assegna un ID univoco
-        combinations = list(itertools.product(*values))
-        combination_ids = {tuple(combination): idx for idx, combination in enumerate(combinations)}
-        
-        # Creiamo il dizionario id: combinazione
-        id_to_combination[name] = {idx: dict(zip(columns, combination)) for combination, idx in combination_ids.items()}
+        id_to_combination[name] = {
+            idx: dict(zip(columns, comb)) for comb, idx in combination_ids.items()
+        }
 
-        # Funzione per ottenere l'ID della combinazione per ogni riga del DataFrame
         def get_combination_id(row):
             row_tuple = tuple(row[col] for col in columns)
-            return combination_ids.get(row_tuple, -1)
+            return combination_ids.get(row_tuple, -1)  # -1 se non trovata
 
-        # Creiamo la nuova colonna 'GroupID' nel DataFrame
         df[f'group_id_{name}'] = df.apply(get_combination_id, axis=1)
+
+    #print(f'Group IDs: {df[[f"group_id_{name}" for name in sensitive_attributes.keys()]].head()}')
+    #print(f'ID to combination: {id_to_combination}')
     return df, id_to_combination
+
 
 
 def assign_group_id_old(data,sensitive_dict,group_name):

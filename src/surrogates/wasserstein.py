@@ -38,6 +38,7 @@ class WassersteinSurrogate:
     def _wasserstein_distance_global(self,p,q):
     
         assert p.shape[1] == q.shape[1], 'Probabilities and target_probabilities must have the same number of classes' 
+        assert p.shape[0] == q.shape[0], 'Probabilities and target_probabilities must have the same number of samples'
         #print('p: ',torch.mean(p,dim=0))
         #print('q: ',torch.mean(q,dim=0))
         F_p = torch.cumsum(torch.mean(p,dim=0),dim=0)
@@ -46,8 +47,9 @@ class WassersteinSurrogate:
         return torch.sum(wasserstein_distance).to(p.device)
     
     def __call__(self, **kwargs):
+        #print('Wasserstein surrogate called')
         probabilities = kwargs.get('probabilities')
-        teacher_probabilities_list = kwargs.get('teacher_probabilities')
+        teacher_probabilities_list = kwargs.get('wasserstein_teacher_probabilities')
         assert probabilities is not None, 'probabilities must be provided'
         assert teacher_probabilities_list is not None, 'teacher_probabilities must be provided'
         teacher_probabilities = teacher_probabilities_list[self.teacher_idx]

@@ -43,6 +43,7 @@ class StatisticScores(BaseMetric):
 
 
 
+
 class GroupFairnessMetric(BaseMetric):
     def __init__(self,**kwargs):
         task = kwargs.get('task','binary')
@@ -136,7 +137,14 @@ class DemographicParity(GroupFairnessMetric):
        
     def get(self):
         if not self.use_multiclass:
-            group_ids = list(self.stats_per_group.keys())
+            group_ids = [
+                gid for gid in self.stats_per_group.keys()
+                if (self.stats_per_group[gid].stat_scores.tp +
+                    self.stats_per_group[gid].stat_scores.fp +
+                    self.stats_per_group[gid].stat_scores.tn +
+                    self.stats_per_group[gid].stat_scores.fn) > 0
+            ]
+
             for i in range(len(group_ids)):
                 for j in range(i+1,len(group_ids)):
                     self.stats_per_group_diff.append(
@@ -148,7 +156,14 @@ class DemographicParity(GroupFairnessMetric):
                         torch.tensor(self.stats_per_group_diff))
                     }
         else: 
-            group_ids = list(self.stats_per_class[0].keys())
+            group_ids = [
+                gid for gid in self.stats_per_group.keys()
+                if (self.stats_per_group[gid].stat_scores.tp +
+                    self.stats_per_group[gid].stat_scores.fp +
+                    self.stats_per_group[gid].stat_scores.tn +
+                    self.stats_per_group[gid].stat_scores.fn) > 0
+            ]
+
             for current_class in range(self.num_classes):
                 for i in range(len(group_ids)):
                     for j in range(i+1,len(group_ids)):

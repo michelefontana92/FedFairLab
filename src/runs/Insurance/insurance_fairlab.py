@@ -1,5 +1,5 @@
 import shutil
-from .folk_run import FolkTablesBinaryRun
+from .insurance_run import InsuranceRun
 from ..run_factory import register_run
 from metrics import MetricsFactory
 from surrogates import SurrogateFactory
@@ -13,10 +13,11 @@ from torch.nn import CrossEntropyLoss
 import torch
 from builder import FedFairLabBuilder
 import wandb
-@register_run('folk_fedfairlab')
-class FolkTablesBinaryHierALMCentralized(FolkTablesBinaryRun):
+
+@register_run('insurance_fedfairlab')
+class InsuranceHierALMCentralized(InsuranceRun):
     def __init__(self, **kwargs) -> None:
-        super(FolkTablesBinaryHierALMCentralized, self).__init__(**kwargs)
+        super(InsuranceHierALMCentralized, self).__init__(**kwargs)
         kwargs['run_dict'] = self.to_dict()
         self.builder = FedFairLabBuilder(**kwargs)
     

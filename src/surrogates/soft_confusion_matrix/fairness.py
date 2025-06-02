@@ -1,25 +1,18 @@
 import torch
 
 def _binary_class_demographic_parity(probabilities, group_masks, group_ids):
+    available_groups = torch.unique(group_masks)
     
-    if len(torch.unique(group_masks)) < 2:
-        #print('Group masks:', torch.unique(group_masks))
-        return torch.tensor(0.0, device=probabilities.device)
-    #print('Group IDs:', torch.unique(group_ids))
-    else:
-        #print('Group IDs:', group_ids)
-        positive_mask = group_masks == group_ids[0]
-        negative_mask = group_masks == group_ids[1]
-        
-        # Controlla se la maschera è vuota
-        if torch.sum(positive_mask) == 0 or torch.sum(negative_mask) == 0:
-            #print('Positive mask:', torch.sum(positive_mask))
-            #print('Negative mask:', torch.sum(negative_mask))
-            return torch.tensor(0.0, device=probabilities.device)
-        
-        dp = torch.mean(probabilities[positive_mask]) - torch.mean(probabilities[negative_mask])
-        return torch.abs(dp)
-    
+    # Escludi il calcolo se uno dei gruppi target non è presente
+    if not all(gid in available_groups for gid in group_ids):
+        return None  # oppure torch.tensor(float('nan'))
+
+    mask_0 = group_masks == group_ids[0]
+    mask_1 = group_masks == group_ids[1]
+
+    dp = torch.mean(probabilities[mask_0]) - torch.mean(probabilities[mask_1])
+    return torch.abs(dp)
+
    
 def demographic_parity(probabilities, **kwargs):
     group_masks = kwargs.get('group_masks')
@@ -28,7 +21,7 @@ def demographic_parity(probabilities, **kwargs):
     
     probabilities = probabilities[:, 1]
     return _binary_class_demographic_parity(probabilities, group_masks, group_ids)
-    
+
 def _binary_class_equal_opportunity(probabilities,labels_mask,group_masks,group_ids):
     
     if len(torch.unique(group_masks)) < 2:

@@ -45,31 +45,36 @@ state = 'AL'
 def preprocess(state,node):
     data_source = ACSDataSource(survey_year='2014', horizon='1-Year', survey='person',root_dir='./data/Folktables_binary/Real')
     acs_data = data_source.get_data(states=[state], download=False)
-    features, label, group = ACSIncome2.df_to_pandas(acs_data)
+    features, label, group = ACSHealthInsurance.df_to_pandas(acs_data)
     df= pd.concat([features, label], axis=1)
+    df['RAC1P'] = acs_data.loc[df.index, 'RAC1P']
+    race_onehot_cols = [col for col in df.columns if col.startswith('RAC') and col not in ['RAC1P']]
+    df = df.drop(columns=race_onehot_cols)
+    df = df.drop(columns=['ST'])
+    print(f'Columns in the dataset: {df.columns.tolist()}')
+    print(f'Dataset head ',df.head())
+    print(f'Dataset info ',df.info())
+   
     df['Race'] = df.apply(lambda x:race[int(x['RAC1P'])],axis=1)
-    df['Job'] = df.apply(lambda x:job[int(x['COW'])],axis=1)
+    df['HINS2'] = df['HINS2'].astype(int)
     df['Gender'] = df.apply(lambda x: sex[int(x['SEX'])],axis=1)
     df['Marital'] = df.apply(lambda x: marital[int(x['MAR'])],axis=1)
 
     df['Race'] = df['Race'].apply(lambda x: 'Indigenous' if x in ['Native','Alaska','AmericanIndian','Hawaiian'] else x)
     df['Race'] = df['Race'].apply(lambda x: 'Other' if x in ['Other','TwoOrMore'] else x)
 
-    df['Job'] = df['Job'].apply(lambda x: 'Public Employee' if x in ['Local government employee','State government employee','Federal government employee'] else x)
-    df['Job'] = df['Job'].apply(lambda x: 'Self Employed' if x in ['Self-employed','Self-employed incorporated'] else x)
-    df['Job'] = df['Job'].apply(lambda x: 'Private Employee' if x in ['Employed Private profit','Employed Private no profit'] else x)
-    df['Job'] = df['Job'].apply(lambda x: 'Unemployed' if x in ['Unemployed','Unpaid family worker'] else x)
-    df = df[df['Job']!='Unemployed']
     df['Marital'] = df['Marital'].apply(lambda x: 'Other' if x in ['Widowed','Separated'] else x)
    
-    df = df.drop(columns=['SEX','RAC1P','COW','MAR'])
+    df = df.drop(columns=['SEX','RAC1P','MAR'])
     #drop all records with Alaskian
     df = df[df['Race']!='Alaska']
+    for col in df.columns:
+        print(f'Column {col} unique values: {df[col].unique()}')
     #stratify train-test split
-    save_path = f'data/Folktables_binary/Real/node_{node}'
+    save_path = f'data/Insurance/Real/node_{node}'
     if not os.path.exists(save_path):
         os.makedirs(save_path)
-    df.to_csv(f'{save_path}/folktables_{state}_binary_clean.csv', index=False)
+    df.to_csv(f'{save_path}/insurance_{state}_binary_clean.csv', index=False)
     return df
 
 def stratify_split(df, sensitive_attributes, target, save_path):
@@ -98,20 +103,24 @@ def stratify_split(df, sensitive_attributes, target, save_path):
     df_test = pd.concat([X_test, y_test], axis=1).reset_index(drop=True)
     if not os.path.exists(save_path):
         os.makedirs(save_path)
-    df_train.to_csv(f'{save_path}/folktables_binary_train.csv', index=False)
-    df_test.to_csv(f'{save_path}/folktables_binary_val.csv', index=False)
+    df_train.to_csv(f'{save_path}/insurance_train.csv', index=False)
+    df_test.to_csv(f'{save_path}/insurance_val.csv', index=False)
 
     print(f"[✓] Train: {len(df_train)} | Test: {len(df_test)}")
 
 
-sensitive_attributes = ['Job','Race','Marital']
-target = 'PINCP'
-save_path = 'data/Folktables_binary/New'
+sensitive_attributes = ['Gender','Race','Marital']
+target = 'ESR'
+save_path = 'data/Insurance/New'
 #states = ['WV','AK','ND','PR','MS','AR','WI','WA','CT','LA','AL','MD','NY','TX','CA']
 states = ['CA','NY','FL','TX','PA','IL','MD','GA','NC','MI']
 
 for node,state in enumerate(states):
     print(f'Processing state {state}...')
     df = preprocess(state,node+1)
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+    if node == 0:
+        df.to_csv(f'{save_path}/insurance_clean.csv', index=False)
     stratify_split(df, sensitive_attributes, target, f'{save_path}/node_{node+1}')
     print()

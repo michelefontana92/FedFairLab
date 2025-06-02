@@ -13,12 +13,12 @@ import copy
 from client import ClientFactory
 from server import ServerFactory
 import ray
-
+import wandb
 
 class FedFairLabBuilder(Base_Builder):
     def _assign_resources(self):
         num_clients = self.num_clients
-        self.num_cpus = num_clients + 1
+        self.num_cpus = 1*(num_clients) + 1
         self.num_gpus = len(self.gpu_devices)
      
         self.num_gpus_per_client = self.num_gpus/num_clients if self.num_gpus > 0 else 0
@@ -285,6 +285,7 @@ class FedFairLabBuilder(Base_Builder):
                     'server_fedfairlab',
                     remote=True,
                     num_gpus=self.num_gpus,
+                    num_cpus=self.num_cpus,
                     clients_init_fn_list=self.clients,
                     **server_params)
         
@@ -297,6 +298,8 @@ class FedFairLabBuilder(Base_Builder):
                     clients_init_fn_list=self.clients,
                     **server_params)
         
+        else:
+            raise ValueError(f'Unknown algorithm: {self.algorithm}. Supported algorithms are fedfairlab and fedavg.')
     def run(self):
         print('Number of CPUs:',self.num_cpus)
         print('Number of GPUs:',self.num_gpus)
@@ -306,7 +309,48 @@ class FedFairLabBuilder(Base_Builder):
         self.server.execute(num_federated_rounds=2)
         self.server.shutdown()
         ray.shutdown()
-     
+    
+    
+    def evaluate(self,checkpoint_path,run_id,client_id=None,init_fl =True,shutdown=False):
+        project='FedFairLab_Folk_New'
+        run = wandb.init(project=project, 
+                         id=run_id, 
+                         resume='must')
+        
+        #print("ID inizializzato:", run.id)
+        #print("Stato della run:", run.)
+        results = {
+             'final_val_demographic_parity_JobRace': 0.3263, 
+             'final_val_demographic_parity_JobMarital': 0.3837,
+             'final_val_demographic_parity_RaceMarital': 0.4847, 
+             'final_val_demographic_parity_Job': 0.1012, 
+             'final_val_demographic_parity_Race': 0.2804, 
+             'final_val_demographic_parity_Marital': 0.3219,
+        }
+        
+        if init_fl:
+            ray.init(num_cpus=self.num_cpus,num_gpus=self.num_gpus)
+            self.server.setup()
+        attributes = ['JobRace', 'JobMarital', 'RaceMarital', 'Job', 'Race', 'Marital']
+        metric_name = 'final_val_demographic_parity_'
        
+        
+        results = self.server.evaluate_model_from_ckpt(checkpoint_path=checkpoint_path,
+                                             log_results=False,
+                                             client_id=client_id)
+        
+        
+            
+        results_to_log = {}
+        for attribute in attributes:
+            results_to_log[f'{metric_name}{attribute}'] = results[f'{metric_name}{attribute}'].item()
+        run.log(results_to_log)
+        
+       
+        run.finish()
+       
+        return 
     
-    
+    def shutdown(self):
+        self.server.shutdown(log_results=False)
+        ray.shutdown()

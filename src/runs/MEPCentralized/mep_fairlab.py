@@ -19,5 +19,5 @@ class MEPHierALMCentralized(CentralizedMEPRun):
           
     def tearDown(self) -> None:
         # Pulizia finale dei file di checkpoint, se necessario
-        #pass
-        shutil.rmtree(f'checkpoints/{self.project_name}')
+        pass
+        #shutil.rmtree(f'checkpoints/{self.project_name}')

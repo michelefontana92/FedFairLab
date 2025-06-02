@@ -61,7 +61,7 @@ class LocalLearner(TorchNNWrapper):
         self.damping_factor = kwargs.get('damping_factor', 1.0)  # Valore di damping per rallentare l'aggiornamento
 
         self.gamma_objective = kwargs.get('gamma_objective', 0.8)
-        self.gamma_constraint = kwargs.get('gamma_constraint', 1.0)
+        self.gamma_constraint = kwargs.get('gamma_constraint', 10.0)
 
         self.inequality_lambdas_0_value = kwargs.get('inequality_lambdas_0_value', 0.1)
         self.equality_lambdas_0_value = kwargs.get('equality_lambdas_0_value', 0.)
@@ -73,6 +73,15 @@ class LocalLearner(TorchNNWrapper):
         self.objective_multiplier_0 = torch.tensor(self.objective_multiplier_0_value, device=self.device)
         self.lambda0_max_value = kwargs.get('lambda0_max_value', 0.1)
         self.target_groups = set()
+
+        self.teachers_kwargs = {'train':{},
+                                'val':{}
+                                }
+
+        self.wasserstein_kwargs = {'train':{},
+                                   'val':{}
+                                  }
+        
         self.verbose = kwargs.get('verbose', False)
         #self.compute_groups_cardinality()
         self.state_path = None
@@ -89,8 +98,10 @@ class LocalLearner(TorchNNWrapper):
                   
         assert self.macro_constraints_list is not None, f'{self.macro_constraints_list} has to be provided'
         self.group_cardinality = None
+        #print('Device:',self.device)
         self._init_alm_parameters()
         
+       
 
         def init_weights(m):
             if isinstance(m, torch.nn.Linear):
@@ -99,7 +110,15 @@ class LocalLearner(TorchNNWrapper):
                     torch.nn.init.zeros_(m.bias)
         
         self.model.apply(init_weights)
+    
+    def set_wasserstein_teachers_kwargs(self,teachers_kwargs):
+        #print('Setting Wasserstein kwargs:',teachers_kwargs)
+        self.wasserstein_kwargs.update(teachers_kwargs)
 
+    def set_teachers_kwargs(self,teachers_kwargs):
+         #print('Setting Teachers kwargs:',teachers_kwargs)
+         self.teachers_kwargs.update(teachers_kwargs)
+    
     def compute_groups_cardinality(self):
         groups = next(iter(self.get_train_loader_eval()))['groups']
         self.group_cardinality = {group_name: {} for group_name in self.target_groups} 
@@ -152,12 +171,12 @@ class LocalLearner(TorchNNWrapper):
         with torch.no_grad():
             kwargs = {}   
             val_loader = self.data_module.val_loader(batch_size=None)
-            val_kwargs = self._compute_kwargs_in_batches(val_loader, self.model,use_entmax=False)
+            val_kwargs = self._compute_kwargs_in_batches(val_loader, self.model,use_entmax=False,use_training=False)
             kwargs['val_kwargs'] = val_kwargs
               
             if update_alm:
                 train_loader = self.data_module.train_loader_eval(batch_size=None)
-                train_kwargs = self._compute_kwargs_in_batches(train_loader, self.model,use_entmax=False)          
+                train_kwargs = self._compute_kwargs_in_batches(train_loader, self.model,use_entmax=False,use_training=True)          
                 kwargs['train_kwargs'] = train_kwargs
                 inequality_constraints = train_kwargs['inequality_constraints']
                 equality_constraints = train_kwargs['equality_constraints']
@@ -253,106 +272,88 @@ class LocalLearner(TorchNNWrapper):
         #if total_penalty > 0:
         #    print('Total Penalty:',total_penalty)
         #print('Total Penalty:',total_penalty)
+        #assert score >= 0, 'Score non può essere negativo!'
         return score
 
        
     def compute_loss_fn(self, **kwargs):
-       
         objective_function = kwargs['objective_function']
         batch_objective_function = kwargs['batch_objective_function']
         equality_constraints = kwargs.get('equality_constraints')
         inequality_constraints = kwargs.get('inequality_constraints')
-        loss = objective_function.clone()
         group_ids = kwargs.get('group_ids')
-        # Inizializza la loss con la funzione obiettivo
-        """
+
         assert group_ids is not None, 'Group ids must be provided'
         
-        if group_ids is not None:
-            group_losses = []
-            #group_counts = torch.tensor([len(group_ids[group_name]) for group_name in self.target_groups], device=self.device)
-            for group_name in self.target_groups:
-                group_list = group_ids[group_name]
-                unique_groups = torch.unique(group_list)
-                total_weight = 0
-                for group in unique_groups:
-                    
-                    mask = group_list == group  # Seleziona i campioni del gruppo
-                    if mask.sum() > 0:  # Evita problemi con gruppi vuoti
-                        group_loss = batch_objective_function[mask].mean()
-                        weight = 1.0 - mask.sum() / batch_objective_function.shape[0]
-                        total_weight += weight
-            
-            if len(group_losses) > 0:
-                
-                loss = torch.stack(group_losses).sum()
+        loss = objective_function.clone()
+        if torch.isnan(loss).any():
+            raise ValueError("NaN trovato nella loss!")
+        group_losses = []
+
+        for group_name in self.target_groups:
+            group_tensor = group_ids[group_name]  # shape [B]
+            unique_group_ids = torch.unique(group_tensor)
+
+            total_weight = 0.0
+            for group_id in unique_group_ids:
+                mask = group_tensor == group_id
+                if mask.sum() > 0:
+                    group_loss = batch_objective_function[mask].mean()
+                    weight = 1.0 - mask.sum().item() / batch_objective_function.shape[0]
+                    group_losses.append(weight * group_loss)
+                    total_weight += weight
+
+        if len(group_losses) > 0:
+            stacked_group_losses = torch.stack(group_losses)
+            if torch.isnan(stacked_group_losses).any():
+                print("NaN in group_losses:", stacked_group_losses)
+            if total_weight > 0:
+                loss += stacked_group_losses.sum() / total_weight
+            else:
+                print("total_weight is zero — skipping group loss contribution")
+
         
-        
-        else: 
-            loss = objective_function.clone()
-        """
-        
+        # === Equality constraints
         if equality_constraints is not None and len(self.equality_constraints_fn_list) > 0:
-           
-            equality_penalty = torch.mean(torch.abs(equality_constraints))
-            equality_penalty *= self.mu  
-            
-            
-            equality_lagrange_multipliers = (self.equality_lambdas * equality_constraints).sum()
-            
-            
-            loss += equality_penalty + equality_lagrange_multipliers
-        
+            equality_penalty = torch.mean(torch.abs(equality_constraints)) * self.mu
+            equality_lagrange = (self.equality_lambdas * equality_constraints).sum()
+            loss += equality_penalty + equality_lagrange
+
+        # === Inequality constraints
         if inequality_constraints is not None and len(self.inequality_constraints_fn_list) > 0:
-            
             if torch.any(self.inequality_lambdas > 0):
-                inequality_penalty = torch.sum(torch.clamp(inequality_constraints,min=0))
-                
-               
-                inequality_lagrange_multipliers = torch.sum(
-                    torch.pow(
-                        torch.clamp(self.inequality_lambdas + self.mu * inequality_constraints, min=0), 2
-                    )
-                )
-                inequality_lagrange_multipliers -= torch.pow(self.inequality_lambdas, 2).sum()
-                inequality_lagrange_multipliers /= (2 * self.mu)
+                penalty = torch.sum(torch.clamp(inequality_constraints, min=0))
+                lambdas_updated = torch.clamp(self.inequality_lambdas + self.mu * inequality_constraints, min=0)
+                lagrange = (lambdas_updated.pow(2) - self.inequality_lambdas.pow(2)).sum() / (2 * self.mu)
+                loss += penalty + lagrange
 
-              
-                loss += inequality_lagrange_multipliers + inequality_penalty
-
-        
         if torch.isnan(loss).any():
             raise ValueError("NaN trovato nella loss!")
 
         return loss
 
     
-    def _compute_kwargs_in_batches(self, loader, model, use_entmax=True):
+    def _compute_kwargs_in_batches(self, loader, model, use_entmax=True,use_training=False):
         all_logits = []
         all_labels = []
         all_group_ids = {group_name: [] for group_name in loader.dataset[0]['groups'].keys()}
         all_group_ids_list = {group_name: [] for group_name in loader.dataset[0]['groups_ids_list'].keys()}
         all_group_masks = {group_name: [] for group_name in loader.dataset[0]['groups'].keys()}
         all_positive_masks = []
-        all_teacher_logits = []
+        all_indices = []
+
+        
         
        
         for batch in loader:
             inputs = batch['data'].float().to(self.device)  
             outputs = model(inputs)  
+            all_indices.append(batch['index'])
 
             all_logits.append(outputs)
             all_labels.append(batch['labels'].to(self.device))
             
-            for teacher_model_dict in self.teacher_model_list:           
-                self.teacher_model = copy.deepcopy(self.model)
-                self.teacher_model.load_state_dict(copy.deepcopy(teacher_model_dict))
-                self.teacher_model.to(self.device)
-                self.teacher_model.eval() 
-            
-                teacher_outputs = self.teacher_model(inputs)
-                all_teacher_logits.append([teacher_outputs])
-            
+
            
             for group_name in batch['groups'].keys():
                 all_group_ids[group_name].append(batch['groups'][group_name].to(self.device))
@@ -367,19 +368,11 @@ class LocalLearner(TorchNNWrapper):
         
         final_logits = torch.cat(all_logits, dim=0)
         final_labels = torch.cat(all_labels, dim=0)
-        final_teacher_logits_list = []
-        final_teacher_logits = None
-       
-        for teacher_logits in all_teacher_logits:
-            final_teacher_logits_list.append(torch.cat(teacher_logits,dim=0)) if len(all_teacher_logits) > 0 else torch.tensor([],device=self.device)
-        if len(final_teacher_logits_list) > 0:  
-            final_teacher_logits = torch.stack(final_teacher_logits_list,dim=0)
-            
-        else: 
-            final_teacher_logits = torch.tensor([],device=self.device)
+        
         final_group_ids = {group_name: torch.cat(all_group_ids[group_name], dim=0) for group_name in all_group_ids}
         final_group_ids_list = {group_name: torch.cat(all_group_ids_list[group_name], dim=0) for group_name in all_group_ids_list}
         final_positive_masks = torch.cat(all_positive_masks, dim=0)
+        final_indices = torch.cat(all_indices, dim=0)
 
        
         kwargs = {
@@ -388,14 +381,15 @@ class LocalLearner(TorchNNWrapper):
             'groups': final_group_ids,
             'groups_ids_list': final_group_ids_list,
             'positive_mask': final_positive_masks,
-            'teacher_logits':final_teacher_logits
+            'index': final_indices,
+            
         }
 
-        kwargs = self._compute_kwargs(kwargs, final_logits, use_entmax=use_entmax)
+        kwargs = self._compute_kwargs(kwargs, final_logits, use_entmax=use_entmax,use_training=use_training)
         
         return kwargs
 
-    def _compute_kwargs(self, batch, outputs, use_entmax=True):
+    def _compute_kwargs(self, batch, outputs, use_entmax=True,use_training=False):
         
         device = self.device
         
@@ -429,58 +423,7 @@ class LocalLearner(TorchNNWrapper):
        
         if torch.isnan(probabilities).any():
             raise ValueError('Probabilità contiene NaN!')
-        teachers_probabilities_list = []
-        teachers_predictions_list = []
-        teachers_softmax_list = []
-        teachers_logits_list = []
-
-        if 'teacher_logits' not in batch.keys():
-            teachers_outputs_list = []
-           
-            for teacher_model_dict in self.teacher_model_list:           
-                self.teacher_model = copy.deepcopy(self.model)
-                self.teacher_model.load_state_dict(copy.deepcopy(teacher_model_dict))
-                self.teacher_model.to(self.device)
-                self.teacher_model.eval() 
-                inputs = batch['data'].float().to(self.device)
-                teacher_outputs = self.teacher_model(inputs)
-                teachers_outputs_list.append(teacher_outputs)
-            if len(teachers_outputs_list) > 0:    
-                teacher_outputs = torch.stack(teachers_outputs_list,dim=0)
-            else:
-                teacher_outputs = torch.tensor([],device=self.device)
-            batch['teacher_logits'] = teacher_outputs
-            
-        else:
-            teacher_outputs = batch['teacher_logits']
-          
-        
-        for teacher_outputs in batch['teacher_logits']:
-            if len(teacher_outputs) > 0:
-                teacher_softmax = torch.nn.functional.softmax(teacher_outputs/1.0, dim=-1)
-               
-                teacher_predictions = torch.argmax(teacher_outputs, dim=-1)
-                if use_entmax:
-                    teacher_probabilities = entmax_bisect(teacher_outputs, alpha=1.5, dim=-1)
-                else:
-                    teacher_probabilities = torch.nn.functional.one_hot(teacher_predictions, num_classes=outputs.size(-1)).float()
-                
-                if torch.isnan(teacher_probabilities).any():
-                    raise ValueError('Teacher Probabilities contiene NaN!')
-                teachers_probabilities_list.append(teacher_probabilities)
-                teachers_predictions_list.append(teacher_predictions)
-                teachers_softmax_list.append(teacher_softmax)
-                teachers_logits_list.append(teacher_outputs)
-        if len(teachers_probabilities_list) > 0:
-            teacher_probabilities = torch.stack(teachers_probabilities_list,dim=0)
-            teacher_predictions = torch.stack(teachers_predictions_list,dim=0)
-            teacher_softmax = torch.stack(teachers_softmax_list,dim=0)
-            teacher_logits = torch.stack(teachers_logits_list,dim=0)
-        else:
-            teacher_probabilities = torch.tensor([],device=self.device)
-            teacher_predictions = torch.tensor([],device=self.device)
-            teacher_softmax = torch.tensor([],device=self.device)
-            teacher_logits = torch.tensor([],device=self.device)
+       
 
         kwargs = {
             'group_ids': group_ids,  
@@ -492,10 +435,47 @@ class LocalLearner(TorchNNWrapper):
             'probabilities': probabilities,  
             'predictions': predictions,
             'output_distribution': output_distribution,
-            'teacher_probabilities': teacher_probabilities,
-            'teacher_softmax_list': teacher_softmax,
-            'teacher_logits_list': teacher_logits,
         }
+
+        teacher_kwargs = self.teachers_kwargs['train'] if use_training else self.teachers_kwargs['val']
+        if 'index' in batch:
+            indices = batch['index']
+        else:
+            raise ValueError("Missing 'index' in batch — required to align teacher_kwargs")
+        
+        #print('Indices shape:',indices.shape)
+        #print('Teacher kwargs:',teacher_kwargs)
+        #print('Max indices: ',torch.max(indices))
+        #for key,v in teacher_kwargs.items():
+         #   print(f"Key: {key}, Shape: {v.shape}")
+        filtered_teacher_kwargs = {}
+        for k, v in teacher_kwargs.items():
+            if isinstance(v, torch.Tensor) and v.numel() > 0:
+                if v.dim() >= 2 and v.shape[1] >= indices.max().item() + 1:
+                    filtered_teacher_kwargs[k] = v[:, indices, ...]  # seleziona il batch corretto
+                else:
+                    print(f"[WARNING] Skipping teacher key {k}: shape={v.shape}, indices max={indices.max().item()}")
+                    filtered_teacher_kwargs[k] = v
+            else:
+                filtered_teacher_kwargs[k] = v
+
+        wasserstein_kwargs = self.wasserstein_kwargs['train'] if use_training else self.wasserstein_kwargs['val']
+        filtered_wasserstein_kwargs = {}
+        for k, v in wasserstein_kwargs.items():
+            if isinstance(v, torch.Tensor) and v.numel() > 0:
+                if v.dim() >= 2 and v.shape[1] >= indices.max().item() + 1:
+                    filtered_wasserstein_kwargs[f'wasserstein_{k}'] = v[:, indices, ...]  # seleziona il batch corretto
+                else:
+                    print(f"[WARNING] Skipping teacher key {k}: shape={v.shape}, indices max={indices.max().item()}")
+                    filtered_wasserstein_kwargs[f'wasserstein_{k}'] = v
+            else:
+                filtered_wasserstein_kwargs[f'wasserstein_{k}'] = v
+        #print('Filtered teacher kwargs:',filtered_teacher_kwargs)
+        #for key in filtered_teacher_kwargs:
+            #print(f"Key: {key}, Shape: {filtered_teacher_kwargs[key].shape}")
+        kwargs.update(filtered_teacher_kwargs)
+        kwargs.update(filtered_wasserstein_kwargs)
+        #kwargs.update(teacher_kwargs)
 
         objective_fn_value = self.objective_fn(**kwargs)
         inequality_constraints, equality_constraints = self.compute_constraints(**kwargs)
@@ -549,7 +529,7 @@ class LocalLearner(TorchNNWrapper):
 
         self.optimizer.zero_grad()
         outputs = self.model(inputs)
-        kwargs = self._compute_kwargs(batch, outputs,use_entmax=True)
+        kwargs = self._compute_kwargs(batch, outputs,use_entmax=True,use_training=True)
         loss = self.compute_loss_fn(**kwargs)
 
         if torch.isnan(loss).any():
@@ -612,7 +592,7 @@ class LocalLearner(TorchNNWrapper):
            loader = self.data_module.train_loader_eval(batch_size=None)
         else:
             loader = self.data_module.val_loader(batch_size=None)
-        kwargs = self._compute_kwargs_in_batches(loader, self.model,use_entmax=False)
+        kwargs = self._compute_kwargs_in_batches(loader, self.model,use_entmax=False,use_training=use_training)
         self.model.load_state_dict(original_model_dict)
         self.model.to(self.device)
         return kwargs
@@ -634,8 +614,12 @@ class LocalLearner(TorchNNWrapper):
             group_name = constraint.group_name
             if group_name is not None:
                 for group in target_groups:
-                    violations_per_group_list[group_name][group.item()].append(constraint_violation)
-       
+                    try:
+                        violations_per_group_list[group_name][group.item()].append(constraint_violation)
+                    except KeyError:
+                        if group_name not in violations_per_group_list:
+                            violations_per_group_list[group_name] = {}
+                        violations_per_group_list[group_name][group.item()] = [torch.tensor(0.0, device=self.device)]
         for key,value_dict in violations_per_group_list.items():
             try:
                 violations_per_group[key] = {k:torch.stack(v).max().item() for k,v in value_dict.items()}
@@ -670,7 +654,7 @@ class LocalLearner(TorchNNWrapper):
 
    
     def fit(self, **kwargs):
-        
+        #print('Current lambdas:',self.inequality_lambdas)
         if self.verbose:
             print(f'[{self.id}]:Number of inequality constraints:',len(self.inequality_constraints_fn_list))
             print(f'Macro constraints:',self.macro_constraints_list)
@@ -736,7 +720,9 @@ class LocalLearner(TorchNNWrapper):
                            
                             model_checkpoint = checkpoint(save_fn=self.save, metrics=metrics)
                             metrics['model_checkpoint'] = 1 if model_checkpoint else 0
-                            
+                            if model_checkpoint:
+                                self.final_inequality_lambdas = copy.deepcopy(self.inequality_lambdas)
+                                self.final_equality_lambdas = copy.deepcopy(self.equality_lambdas)
 
                     if not disable_log:
                         self.logger.log(metrics)
@@ -760,11 +746,75 @@ class LocalLearner(TorchNNWrapper):
             if not disable_log:
                self.logger.log(final_metrics)
 
-          
-        return copy.deepcopy(self.model.state_dict())
+        #print('Final lambdas:',self.inequality_lambdas)  
+        return copy.deepcopy(self.model.state_dict()),self.final_inequality_lambdas, self.final_equality_lambdas
 
+    def query_teachers(self, teacher_model_dict_list, use_training=False, **kwargs):
+        use_entmax = kwargs.get('use_entmax', True)
 
-    
+        all_teacher_logits = []
+        teachers_probabilities_list = []
+        teachers_predictions_list = []
+        teachers_softmax_list = []
+        teachers_logits_list = []
+        if teacher_model_dict_list is not None and len(teacher_model_dict_list) > 0:
+            if use_training:
+                loader = self.data_module.train_loader_eval(batch_size=None)
+            else:
+                loader = self.data_module.val_loader(batch_size=None)
+            
+            for teacher_model_dict in teacher_model_dict_list:
+                teacher_model = copy.deepcopy(self.model)
+                teacher_model.load_state_dict(copy.deepcopy(teacher_model_dict))
+                teacher_model.to(self.device)
+                teacher_model.eval()
 
-    
-        
+                teacher_outputs_list = []
+                for batch in loader:
+                    inputs = batch['data'].float().to(self.device)
+                    with torch.no_grad():
+                        outputs = teacher_model(inputs)
+                    teacher_outputs_list.append(outputs)
+                    all_teacher_logits.append(outputs)
+
+                if len(teacher_outputs_list) > 0:
+                    stacked_outputs = torch.cat(teacher_outputs_list, dim=0)
+                else:
+                    stacked_outputs = torch.tensor([], device=self.device)
+
+                if stacked_outputs.numel() > 0:
+                    teacher_softmax = torch.nn.functional.softmax(stacked_outputs / 1.0, dim=-1)
+                    teacher_predictions = torch.argmax(stacked_outputs, dim=-1)
+
+                    if use_entmax:
+                        teacher_probabilities = entmax_bisect(stacked_outputs, alpha=1.5, dim=-1)
+                    else:
+                        teacher_probabilities = torch.nn.functional.one_hot(
+                            teacher_predictions, num_classes=stacked_outputs.size(-1)
+                        ).float()
+
+                    if torch.isnan(teacher_probabilities).any():
+                        raise ValueError("Teacher Probabilities contiene NaN!")
+
+                    teachers_probabilities_list.append(teacher_probabilities)
+                    teachers_predictions_list.append(teacher_predictions)
+                    teachers_softmax_list.append(teacher_softmax)
+                    teachers_logits_list.append(stacked_outputs)
+
+        if len(teachers_probabilities_list)> 0:
+            teacher_probabilities = torch.stack(teachers_probabilities_list, dim=0)
+            teacher_predictions = torch.stack(teachers_predictions_list, dim=0)
+            teacher_softmax = torch.stack(teachers_softmax_list, dim=0)
+            teacher_logits = torch.stack(teachers_logits_list, dim=0)
+        else:
+            teacher_probabilities = torch.tensor([], device=self.device)
+            teacher_predictions = torch.tensor([], device=self.device)
+            teacher_softmax = torch.tensor([], device=self.device)
+            teacher_logits = torch.tensor([], device=self.device)
+
+        return {
+            'teacher_probabilities': teacher_probabilities,
+            'teacher_softmax_list': teacher_softmax,
+            'teacher_logits_list': teacher_logits,
+            'teacher_predictions_list': teacher_predictions,
+        }

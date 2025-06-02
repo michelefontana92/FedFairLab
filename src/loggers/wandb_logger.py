@@ -91,21 +91,42 @@ class WandbLogger(BaseLogger):
         wandb.log_artifact(artifact)
         
     def close(self):
+        # Log artifact: data module
         if self.data_module is not None:
             with open('data.pkl', 'wb') as f:
                 pkl.dump(self.data_module, f)
             self.data_artifact.add_file('data.pkl')
-            self.run.log_artifact(self.data_artifact)
+            try:
+                self.run.log_artifact(self.data_artifact)
+            except wandb.errors.UsageError as e:
+                print("Cannot log data_artifact: run already finished.")
             os.remove('data.pkl')
-        if os.path.exists(os.path.join(self.file_dir, self.file_path)):
-            self.artifact.add_file(os.path.join(self.file_dir, self.file_path))
-            self.run.log_artifact(self.artifact)
-        
-        if os.path.exists(os.path.join(self.checkpoint_dir, self.checkpoint_path)):
-            self.model_artifact.add_file(os.path.join(self.checkpoint_dir, self.checkpoint_path))
-            self.run.log_artifact(self.model_artifact)
+
+        # Log artifact: generic file
+        file_path = os.path.join(self.file_dir, self.file_path)
+        if os.path.exists(file_path):
+            self.artifact.add_file(file_path)
+            try:
+                self.run.log_artifact(self.artifact)
+            except wandb.errors.UsageError as e:
+                print("Cannot log artifact: run already finished.")
+
+        # Log artifact: model checkpoint
+        checkpoint_path = os.path.join(self.checkpoint_dir, self.checkpoint_path)
+        if os.path.exists(checkpoint_path):
+            self.model_artifact.add_file(checkpoint_path)
+            try:
+                self.run.log_artifact(self.model_artifact)
+            except wandb.errors.UsageError as e:
+                print("Cannot log model_artifact: run already finished.")
+
+        # Close local file logger
         self.file_logger.close()
-        wandb.finish()
+
+        # Only then finish the wandb run (and be sure to use self.run)
+        if self.run is not None:
+            self.run.finish()
+
         
         
         
