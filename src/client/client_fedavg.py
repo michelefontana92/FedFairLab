@@ -19,13 +19,14 @@ class ClientFedAvg(BaseClient):
         assert self.model is not None, "Model is required"
         assert self.data is not None, "Data is required"
         self.log_model = kwargs.get('log_model', False)
-        self.id = kwargs.get('client_name', 'client_fedavg')
+        self.client_name = kwargs.get('client_name', 'client_fedavg')
        
         
         self.checkpoint_config = kwargs.get('checkpoint_config')
         self.checkpoint_dir = self.checkpoint_config['checkpoint_dir']
         self.checkpoint_name = self.checkpoint_config['checkpoint_name']
         self.checkpoint_path = os.path.join(self.checkpoint_dir,self.checkpoint_name)
+        self.client_checkpoints = kwargs.get('client_callbacks')
         self.callbacks_fn = [
             partial(EarlyStopping,
                     patience=self.checkpoint_config['patience'],
@@ -38,7 +39,7 @@ class ClientFedAvg(BaseClient):
                     monitor=self.checkpoint_config['monitor'],
                     mode=self.checkpoint_config['mode'])
                           ]
-        
+
         
         self.optimizer_name = kwargs.get('optimizer_name','Adam')
         self.optimizer_fn = partial(getattr(torch.optim,
@@ -75,68 +76,18 @@ class ClientFedAvg(BaseClient):
         assert isinstance(global_model,torch.nn.Module), "global_model must be a torch.nn.Module"
         self.wrapper.reset(self.optimizer_fn,self.callbacks_fn)
         self.wrapper.set_params(global_model)
-        self.wrapper.fit()
-        
+        new_model = self.wrapper.fit()
+
         result = {
             'weight': len(self.wrapper.data_module.datasets['train']),
             'params': self.wrapper.get_params()
         }
        
-
+        kwargs['model'] = new_model
+        self._eval_and_log(**kwargs)
         return result
         
-    def evaluate(self,**kwargs):
-        eval_local_model = kwargs.get('eval_local_model', True)
-        if eval_local_model:
-            local_scores = self._evaluate_local_model()
-        dict2send, global_scores = self._evaluate_global_model(**kwargs)
-        if eval_local_model:
-            global_scores.update(local_scores)
-        self.wrapper.logger.log(global_scores)
-        return dict2send
-    
-    def evaluate_best_model(self,**kwargs):
-        #if os.path.exists(self.checkpoint_path):
-        local_scores = self._evaluate_local_model()
-        dict2send, global_scores = self._evaluate_global_model(**kwargs)
-        global_scores.update(local_scores)
-        final_scores = {}
-        for key,v in global_scores.items():
-            final_scores[f'final_{key}'] = v
-        self.wrapper.logger.log(final_scores)
-        return dict2send
-    
-    def _evaluate_global_model(self,**kwargs):
-        global_model = kwargs.get('global_model')
-        assert isinstance(global_model,torch.nn.Module), "global_model must be a torch.nn.Module"
-        self.wrapper.set_params(global_model)
-        train_scores=self.wrapper.score(
-            self.wrapper.data_module.train_loader_eval(),
-            self.metrics)
-        val_scores=self.wrapper.score(
-            self.wrapper.data_module.val_loader(),
-            self.metrics)
-        local_metrics = {}
-        for metric in train_scores.keys():
-            local_metrics[f'global_train_{metric}'] = train_scores[metric]
-            local_metrics[f'global_val_{metric}'] = val_scores[metric]
-        return {'train':train_scores,'val':val_scores},local_metrics
-    
-    def _evaluate_local_model(self,**kwargs):
-        local_model = torch.load(self.checkpoint_path)
-        self.wrapper.set_params_from_dict(local_model)
-        train_scores=self.wrapper.score(
-            self.wrapper.data_module.train_loader_eval(),
-            self.metrics)
-        val_scores=self.wrapper.score(
-            self.wrapper.data_module.val_loader(),
-            self.metrics)
-        local_metrics = {}
-        for metric in train_scores.keys():
-            local_metrics[f'local_train_{metric}'] = train_scores[metric]
-            local_metrics[f'local_val_{metric}'] = val_scores[metric]
-        return local_metrics
-
+   
     def fine_tune(self,**kwargs):
         global_model = kwargs.get('global_model')        
         assert isinstance(global_model,torch.nn.Module), "global_model must be a torch.nn.Module"
@@ -153,6 +104,62 @@ class ClientFedAvg(BaseClient):
         local_scores = self._evaluate_local_model()
         self.wrapper.logger.log(local_scores)
 
+    def evaluate(self,**kwargs):
+        return self._eval_and_log(**kwargs)
+    
+    def _get_final_results(self,**kwargs):
+        checkpoint = self.client_checkpoints[0]
+        assert isinstance(checkpoint,ModelCheckpoint), "Checkpoint must be an instance of ModelCheckpoint"
+        best_results = self.load(checkpoint.get_model_path())
+        file_path = checkpoint.get_model_path()
+        best_metrics = best_results['metrics']
+        best_model_params = best_results['model_state_dict']
+        return best_model_params,best_metrics,file_path
+    
+    def _log_final_results(self,**kwargs):
+        _,metrics,path = self._get_final_results(**kwargs)
+        final_results = {}
+        for key,v in metrics.items():
+            final_results[f'final_{key}'] = v
+        self.logger.log(final_results)
+        self.logger.log_artifact(f'{self.client_name}_local_model',path)
+    
+    
     def shutdown(self,**kwargs):
-        self.wrapper.logger.close()
+        log_results = kwargs.get('log_results',True)
+        if log_results:
+            self._log_final_results(**kwargs)
+        self.logger.close()
+
+    def save(self, metrics,path):
+        save_dict = {
+            'model_state_dict': self.model,
+            'metrics': metrics}
+        torch.save(save_dict, path)
+    
+    def load(self, path):
+      return torch.load(path)
+    
+    
+    def _eval_and_log(self,**kwargs):
+        model = kwargs.get('model')
+        assert isinstance(model,torch.nn.Module), "model must be a torch.nn.Module"
+        self.wrapper.set_params(model)
+        train_scores=self.wrapper.score(
+            self.wrapper.data_module.train_loader_eval(),
+            self.metrics)
+        val_scores=self.wrapper.score(
+            self.wrapper.data_module.val_loader(),
+            self.metrics)
+        metrics = {}
+        for metric in train_scores.keys():
+            metrics[f'train_{metric}'] = train_scores[metric]
+            metrics[f'val_{metric}'] = val_scores[metric]
+        
+        for checkpoint in self.client_checkpoints:
+            if isinstance(checkpoint,ModelCheckpoint):
+                model_checkpoint = checkpoint(save_fn=partial(self.save,metrics), metrics=metrics)
+                metrics['model_checkpoint'] = 1 if model_checkpoint else 0
+        self.logger.log(metrics)
+        return {'train':train_scores,'val':val_scores}
 

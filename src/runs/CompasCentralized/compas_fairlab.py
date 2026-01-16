@@ -17,7 +17,9 @@ class CompasHierALMCentralized(CentralizedCompasRun):
     
     def run(self):
         self.builder.run()
-          
+
+    def eval(self):
+        pass      
     def tearDown(self) -> None:
         # Pulizia finale dei file di checkpoint, se necessario
         #pass

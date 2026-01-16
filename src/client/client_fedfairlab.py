@@ -10,7 +10,7 @@ from callbacks import ModelCheckpoint
 import torch 
 from functools import partial
 @register_client("client_fedfairlab")
-@ray.remote
+@ray.remote(num_cpus=2)
 class ClientFedFairLab(BaseClient):
     
     def profile(func):
@@ -39,11 +39,27 @@ class ClientFedFairLab(BaseClient):
         self.client_checkpoints = kwargs.get('client_callbacks')
         assert self.local_model is not None, "Model is required"
         self.state = None
+        self.orchestrator_map = {}
         
         
         print(f"Client {self.client_name} initialized")
        
+    def _get_orchestrator(self, problem_name, problem_kwargs, model_params=None):
     
+        if problem_name not in self.orchestrator_map:
+            print(f"Initializing orchestrator for {problem_name}")
+            orchestrator = self.orchestrator_fn(logger=None, **problem_kwargs)
+            assert isinstance(orchestrator, OrchestratorWrapper), f"Invalid orchestrator for {problem_name}"
+            self.orchestrator_map[problem_name] = orchestrator
+        else: 
+            print(f"Using cached orchestrator for {problem_name}")
+
+        orchestrator = self.orchestrator_map[problem_name]
+        if model_params is not None:
+            orchestrator.set_model_params(model_params)
+    
+        return orchestrator
+
     def setup(self,**kwargs):
         print("Setting up client")
 
@@ -52,7 +68,7 @@ class ClientFedFairLab(BaseClient):
         problem = kwargs.get('problem')
         #print(f'Number of teachers: {len(problem["aggregation_teachers_list"])}')      
         assert problem is not None, "Problem is required"
-        self.orchestrator = self.orchestrator_fn(logger=None,**problem)
+        self.orchestrator = self.orchestrator_fn(logger=None, **problem)
         assert self.orchestrator is not None, "Orchestrator is required"
         assert isinstance(self.orchestrator, OrchestratorWrapper), "Orchestrator must be an instance of OrchestratorWrapper"
         #print(f"Client {self.client_name} problem teachers: {len(self.orchestrator.aggregation_teachers_list)}")
@@ -60,33 +76,38 @@ class ClientFedFairLab(BaseClient):
         if current_model_params is not None:
             self.orchestrator.set_model_params(current_model_params)
        
-    #@profile 
+    @profile 
     def fit(self,**kwargs):
         num_local_epochs = kwargs.get('num_local_epochs',self.num_local_epochs)
         num_global_epochs = kwargs.get('num_global_epochs',self.num_global_epochs)
+        print(f"Client {self.client_name} fitting for {num_global_epochs} global epochs and {num_local_epochs} local epochs")
         #if num_local_epochs != self.num_local_epochs:
         #    print(f"Client {self.client_name} num_local_epochs: {num_local_epochs}")
         problem = kwargs.get('problem')
         #constraint = problem['inequality_constraints'][1]
         #print(f"Client {self.client_name} constraint lower bound: {constraint.lower_bound}")
         problem_name = problem['name']
-        self._init_orchestrator(**kwargs)
-        #if self.state is not None:
-        #    self.orchestrator.set_state(self.state)
-        
-        #model_params = kwargs.get('model_params')
-        #self.orchestrator.set_model_params(model_params)
+        aggregation_teachers_list = problem.get('aggregation_teachers_list',[])
+        model_params = kwargs.get('model_params')
+       
+            
+        aggregation_weights =problem.get('aggregation_weights',None)
+        self.orchestrator = self._get_orchestrator(problem_name, problem,model_params)
 
         current_state = self.state if problem_name == 'local_problem' else None
-        updated_model,state=self.orchestrator.fit(num_global_iterations=num_global_epochs,
+        updated_model,state=self.orchestrator.fit(
+                                            model_params=model_params,
+                                            num_global_iterations=num_global_epochs,
                                             num_local_epochs=num_local_epochs,
-                                            state=current_state)
+                                            state=current_state,
+                                            aggregation_teachers_list=aggregation_teachers_list,
+                                            aggregation_weights=aggregation_weights,)
         
         if problem_name == 'local_problem':
             self.state = copy.deepcopy(state)
             #print(f"Client {self.client_name} state: {self.state['inequality_lambdas']}")
         #print(f'Client {self.client_name} new state: {self.state}')
-        return {'params':copy.deepcopy(updated_model.state_dict()),
+        return {'params':updated_model.state_dict(),
                 'weight':1.0
                 }
     
@@ -152,7 +173,10 @@ class ClientFedFairLab(BaseClient):
         problem = kwargs.get('problem')
         problem_name = problem['name']
         
-        self._init_orchestrator(**kwargs)
+        problem = kwargs['problem']
+        problem_name = problem['name']
+        self.orchestrator = self._get_orchestrator(problem_name, problem)
+
         model_params = kwargs.get('model_params')
         assert model_params is not None, "Model parameters are required"
         results = self.orchestrator.evaluate(model_params)
@@ -163,7 +187,11 @@ class ClientFedFairLab(BaseClient):
     
     #@profile 
     def evaluate_constraints(self,**kwargs):
-        self._init_orchestrator(**kwargs)
+        #print(f"\n[CLIENT {self.client_name}] Evaluating constraints list")
+        problem = kwargs['problem']
+        problem_name = problem['name']
+        self.orchestrator = self._get_orchestrator(problem_name, problem)
+
         model_params = kwargs.get('model_params')
         log_results = kwargs.get('log_results',True)
         performance_constraint = kwargs.get('performance_constraint')
@@ -216,9 +244,13 @@ class ClientFedFairLab(BaseClient):
         self.logger.log(final_results)
         self.logger.log_artifact(f'{self.client_name}_local_model',path)
     
-    #@profile 
+    @profile 
     def evaluate_constraints_list(self,**kwargs):
-        self._init_orchestrator(**kwargs)
+        #print(f"\n[CLIENT {self.client_name}] Evaluating constraints list")
+        problem = kwargs['problem']
+        problem_name = problem['name']
+        self.orchestrator = self._get_orchestrator(problem_name, problem)
+
         log_results = kwargs.get('log_results',True)
         problem = kwargs.get('problem')
         problem_name = problem['name']
@@ -277,7 +309,7 @@ class ClientFedFairLab(BaseClient):
         log_results = kwargs.get('log_results',True)
         best_local_model_params,_,_= self._get_final_results(**kwargs)
         kwargs['num_local_epochs'] = 10
-        kwargs['num_global_epochs'] = 100
+        kwargs['num_global_epochs'] = 1
         kwargs['model_params'] = copy.deepcopy(best_local_model_params)
         self.state = None
         personalized_results_dict = self.fit(**kwargs)

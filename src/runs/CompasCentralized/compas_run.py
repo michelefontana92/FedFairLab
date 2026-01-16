@@ -54,7 +54,8 @@ class CentralizedCompasRun(BaseRun):
                                                 ])
         
         
-
+    def eval(self):
+        pass
     def setUp(self):
         pass
     def run(self):

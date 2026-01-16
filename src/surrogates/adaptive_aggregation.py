@@ -681,7 +681,83 @@ class AdaptiveAggregationF1Surrogate8:
         self.use_max = kwargs.get('use_max', False)
         self.lambda_global = kwargs.get("lambda_global", 1.0)
         self.lambda_peer = kwargs.get("lambda_peer", 1.0)
-        self.temperature = kwargs.get("temperature", 2)  
+        self.temperature = kwargs.get("temperature", 2.0)  
+        self.weights_list = []  
+
+    def set_weights(self, weights):
+        self.weights_list = weights
+
+    def _wasserstein_distance_global(self, p, q):
+        assert p.shape[1] == q.shape[1], 'Distributions must have same number of classes'
+        F_p = torch.cumsum(torch.mean(p, dim=0), dim=0)
+        F_q = torch.cumsum(torch.mean(q, dim=0), dim=0)
+        return torch.sum(torch.abs(F_p - F_q)).to(p.device)
+
+    def __call__(self, **kwargs):
+        logits = kwargs.get('logits')
+        labels = kwargs.get('labels')
+        probabilities = kwargs.get('probabilities')
+        teacher_logits_list = kwargs.get('teacher_logits_list')
+        output_distribution = kwargs.get('output_distribution')
+        teacher_probabilities_list = kwargs.get('teacher_probabilities')
+
+        assert logits is not None and labels is not None, 'logits and labels must be provided'
+        assert probabilities is not None, 'probabilities must be provided'
+        assert teacher_logits_list is not None, 'teacher_logits_list must be provided'
+        assert output_distribution is not None, 'output_distribution must be provided'
+        assert len(self.weights_list) == len(teacher_logits_list), \
+            'weights_list must match length of teacher_logits_list'
+
+        if torch.isnan(probabilities).any():
+            raise ValueError('Probabilities contain NaN')
+        for t in teacher_logits_list:
+            if torch.isnan(t).any():
+                raise ValueError("Teacher logits contain NaN")
+            #print('Teacher logits shape:', t.shape)
+            #print('Student logits shape:', logits.shape)
+            assert t.shape == logits.shape, 'Teacher and student logits must match in shape'
+        
+        if isinstance(self.weights_list, torch.Tensor):
+            raw_weights = self.weights_list
+        else:
+            assert isinstance(self.weights_list, (list, tuple)), "weights_list must be a list or tuple"
+            raw_weights = torch.tensor(self.weights_list, device=teacher_logits_list[0].device)
+            raw_weights = raw_weights.to(dtype=teacher_logits_list[0].dtype)
+
+        #raw_weights = torch.tensor(self.weights_list, dtype=torch.float32, device=teacher_logits_list[0].device)
+        weights_tensor = torch.softmax(raw_weights / 0.5, dim=0)
+        #print('Weights tensor:', weights_tensor)
+        #print('Weights:', weights_tensor)
+        if isinstance(teacher_logits_list, torch.Tensor):
+            stacked_logits = teacher_logits_list  # già [T, B, C]
+        else:
+            assert isinstance(teacher_logits_list, (list, tuple)), "teacher_logits_list must be a list or tuple"
+            stacked_logits = torch.stack(teacher_logits_list, dim=0)
+
+        weighted_logits = torch.einsum('tbc,t->bc', stacked_logits, weights_tensor)  # [B, C]
+
+        # Teacher consensus: softmax over averaged logits
+        teacher_ensemble_distribution = torch.softmax(weighted_logits / self.temperature, dim=1)  # [B, C]
+        #student_distribution = torch.softmax(logits, dim=1)  # [B, C]
+        # Student prediction: log-softmax
+        student_log_probs = torch.log_softmax(logits / self.temperature, dim=1)  # [B, C]
+        
+        loss = torch.nn.functional.kl_div(student_log_probs, teacher_ensemble_distribution, reduction='batchmean',log_target=False) * (self.temperature ** 2)
+        #loss = self._wasserstein_distance_global(student_distribution, teacher_ensemble_distribution)
+        #print('Loss:', loss.item())
+        return loss
+
+@register_surrogate('adaptive_aggregation_f1_8_max')
+class AdaptiveAggregationF1Surrogate8Max:
+    def __init__(self, **kwargs) -> None:
+        self.name = kwargs.get('name', 'surrogate')
+        self.weight = kwargs.get('weight', 1.0)
+        self.average = kwargs.get('average', None)
+        self.upper_bound = kwargs.get('upper_bound', 1.0)
+        self.use_max = kwargs.get('use_max', False)
+        self.lambda_global = kwargs.get("lambda_global", 1.0)
+        self.lambda_peer = kwargs.get("lambda_peer", 1.0)
+        self.temperature = kwargs.get("temperature", 2.0)  
         self.weights_list = []  
 
     def set_weights(self, weights):
@@ -727,6 +803,7 @@ class AdaptiveAggregationF1Surrogate8:
         #raw_weights = torch.tensor(self.weights_list, dtype=torch.float32, device=teacher_logits_list[0].device)
         weights_tensor = torch.softmax(raw_weights / self.temperature, dim=0)
         #print('Weights tensor:', weights_tensor)
+        #print('Weights:', weights_tensor)
         if isinstance(teacher_logits_list, torch.Tensor):
             stacked_logits = teacher_logits_list  # già [T, B, C]
         else:
@@ -736,17 +813,16 @@ class AdaptiveAggregationF1Surrogate8:
         weighted_logits = torch.einsum('tbc,t->bc', stacked_logits, weights_tensor)  # [B, C]
 
         # Teacher consensus: softmax over averaged logits
-        teacher_ensemble_distribution = torch.softmax(weighted_logits, dim=1)  # [B, C]
-
+        teacher_ensemble_distribution = torch.softmax(weighted_logits / self.temperature, dim=1)  # [B, C]
+        #student_distribution = torch.softmax(logits, dim=1)  # [B, C]
         # Student prediction: log-softmax
-        student_log_probs = torch.log_softmax(logits, dim=1)  # [B, C]
-
-        # KL divergence
-        loss = torch.nn.functional.kl_div(student_log_probs, teacher_ensemble_distribution, reduction='batchmean')
-
-        return loss
-
-
+        student_log_probs = torch.log_softmax(logits / self.temperature, dim=1)  # [B, C]
+        
+        loss = torch.nn.functional.kl_div(student_log_probs, teacher_ensemble_distribution, reduction='batchmean',log_target=False) * (self.temperature ** 2)
+        #loss = self._wasserstein_distance_global(student_distribution, teacher_ensemble_distribution)
+        #print('Loss:', loss.item())
+        return -loss
+    
 @register_surrogate('adaptive_aggregation_f1_9')
 class AdaptiveAggregationF1Surrogate9:
     def __init__(self, **kwargs) -> None:
@@ -815,22 +891,39 @@ class AdaptiveAggregationF1Surrogate10:
         self.use_max = kwargs.get('use_max', False)
         self.lambda_global = kwargs.get("lambda_global", 1.0)
         self.temperature = kwargs.get("temperature", 2.0)
+        self.weights_list = []
+    
+    def set_weights(self, weights):
+        self.weights_list = weights
 
     def _distillation_loss(self, logits, teacher_logits_list, 
                            probabilities, teacher_probabilities_list, labels):
         labels = labels.float()
         student_prob = probabilities[:, 1]
 
+        """
+        if isinstance(self.weights_list, torch.Tensor):
+            raw_weights = self.weights_list
+        else:
+            assert isinstance(self.weights_list, (list, tuple)), "weights_list must be a list or tuple"
+            raw_weights = torch.tensor(self.weights_list, device=teacher_logits_list[0].device)
+            raw_weights = raw_weights.to(dtype=teacher_logits_list[0].dtype)
+
+        weights_tensor = torch.softmax(raw_weights / self.temperature, dim=0)
+        #print('Weights tensor:', weights_tensor)
+        """
+        
         # ==== 1. Crea ensemble logits (media)
         if isinstance(teacher_logits_list, torch.Tensor):
             stacked = teacher_logits_list  # [T, B, C]
         else:
             stacked = torch.stack(teacher_logits_list, dim=0)  # [T, B, C]
         ensemble_logits = stacked.mean(dim=0)  # [B, C]
+        #ensemble_logits = torch.einsum('tbc,t->bc', stacked, weights_tensor)  # [B, C]
 
         # ==== 2. Costruisci FP/FN mask
         with torch.no_grad():
-            teacher_probs = teacher_probabilities_list.mean(dim=0)  # [B, C]
+            teacher_probs = torch.nn.functional.softmax(ensemble_logits,dim=1)  # [B, C]
             teacher_pred = torch.argmax(teacher_probs, dim=1).float()
 
         fn_mask = labels * teacher_pred * (1 - student_prob)
@@ -839,15 +932,17 @@ class AdaptiveAggregationF1Surrogate10:
 
         # ==== 3. Teacher soft + confidenza
         T = self.temperature
+
+        
         student_log_soft = torch.log_softmax(logits / T, dim=1)
         teacher_soft = torch.softmax(ensemble_logits / T, dim=1).detach()
-        teacher_conf = teacher_soft.max(dim=1)[0].unsqueeze(1)  # [B, 1]
+        #teacher_conf = teacher_soft.max(dim=1)[0].unsqueeze(1)  # [B, 1]
 
         # ==== 4. KL distillazione focalizzata + pesata per confidenza
         kl = torch.nn.functional.kl_div(student_log_soft, teacher_soft, reduction='none').sum(dim=1, keepdim=True)
         kl = kl * (T * T)
 
-        mask = correction_mask * teacher_conf  # [B, 1], pesata
+        mask = correction_mask #* teacher_conf  # [B, 1], pesata
         loss = (kl * mask).sum() / (mask.sum() + 1e-8)
 
         return loss
@@ -918,12 +1013,12 @@ class BatchAdaptiveAggregationF1Surrogate10:
         T = self.temperature
         student_log_soft = torch.log_softmax(logits / T, dim=1)
         teacher_soft = torch.softmax(ensemble_logits / T, dim=1).detach()
-        teacher_conf = teacher_soft.max(dim=1)[0].unsqueeze(1)  # [B, 1]
+        #teacher_conf = teacher_soft.max(dim=1)[0].unsqueeze(1)  # [B, 1]
 
         kl = torch.nn.functional.kl_div(student_log_soft, teacher_soft, reduction='none').sum(dim=1, keepdim=True)
         kl = kl * (T * T)
 
-        mask = correction_mask * teacher_conf  # [B, 1]
+        mask = correction_mask   # [B, 1]
         masked_kl = (kl * mask).squeeze(1)  # [B]
 
         denom = (mask.squeeze(1) + 1e-8)  # [B]
@@ -967,3 +1062,67 @@ class BatchAdaptiveAggregationF1Surrogate10:
         )  # [B]
 
         return ce_loss_per_sample + self.lambda_global * distill_loss_per_sample  # [B]
+
+@register_surrogate('adaptive_aggregation_f1_11')
+class AdaptiveAggregationF1Surrogate11:
+    def __init__(self, **kwargs) -> None:
+        self.name = kwargs.get('name', 'adaptive_aggregation')
+        self.lambda_global = kwargs.get("lambda_global", 1.0)
+        self.lambda_entropy = kwargs.get("lambda_entropy", 1.0)
+        self.temperature = float(kwargs.get("temperature", 2.0))
+        self.confidence_threshold = kwargs.get("confidence_threshold", 0.7)
+        self.focus_only_high_conf = kwargs.get("focus_only_high_conf", True)
+        self.weights_list = []
+
+    def set_weights(self, weights):
+        self.weights_list = weights
+
+    def __call__(self, **kwargs):
+        logits = kwargs.get('logits')                           # [B, C]
+        teacher_logits_list = kwargs.get('teacher_logits_list')  # [T, B, C]
+
+        assert logits is not None
+        assert teacher_logits_list is not None
+        assert len(self.weights_list) == len(teacher_logits_list)
+
+        # === Normalize teacher weights
+        raw_weights = torch.tensor(self.weights_list, device=logits.device, dtype=logits.dtype)
+        weights_tensor = torch.softmax(raw_weights / self.temperature, dim=0)  # [T]
+
+        # === Stack and combine teacher logits
+        if isinstance(teacher_logits_list, torch.Tensor):
+            stacked_logits = teacher_logits_list
+        else:
+            stacked_logits = torch.stack(teacher_logits_list, dim=0)  # [T, B, C]
+
+        weighted_logits = torch.einsum('tbc,t->bc', stacked_logits, weights_tensor)  # [B, C]
+        teacher_probs = torch.softmax(weighted_logits, dim=1)  # [B, C]
+
+        # === Confidence mask (focus distillation only where teachers agree confidently)
+        with torch.no_grad():
+            confidence = teacher_probs.max(dim=1)[0]  # [B]
+            if self.focus_only_high_conf:
+                mask = (confidence > self.confidence_threshold).float()  # [B]
+            else:
+                mask = torch.ones_like(confidence)
+
+        # === Student prediction
+        student_log_probs = torch.log_softmax(logits, dim=1)  # [B, C]
+
+        # === KL divergence
+        kl_div = torch.nn.functional.kl_div(
+            student_log_probs, teacher_probs, reduction='none', log_target=False
+        ).sum(dim=1)  # [B]
+
+        masked_kl = kl_div * mask
+        loss_kl = masked_kl.sum() / (mask.sum() + 1e-8)
+
+        # === Optional entropy regularization on consensus
+        if self.lambda_entropy > 0:
+            entropy = -(teacher_probs * teacher_probs.log()).sum(dim=1)  # [B]
+            entropy_loss = entropy.mean()
+            total_loss = self.lambda_global * loss_kl + self.lambda_entropy * entropy_loss
+        else:
+            total_loss = self.lambda_global * loss_kl
+
+        return total_loss

@@ -92,6 +92,7 @@ class BinaryF1Surrogate:
         self.average = kwargs.get('average',None)
         self.upper_bound = kwargs.get('upper_bound',1.0)
         self.use_max = kwargs.get('use_max',False)
+        self.mode = kwargs.get('mode','min')
         self.target_groups = None
         self.group_name = None
         
@@ -110,12 +111,46 @@ class BinaryF1Surrogate:
                                        positive_mask=positive_mask,
                                        average=self.average)
         
-        if self.use_max:
-            return torch.max(torch.zeros_like(f1),self.upper_bound-f1)
-        return self.upper_bound-f1
+        if self.mode == 'min':
+            if self.use_max:
+                return torch.max(torch.zeros_like(f1),self.upper_bound-f1)
+            return self.upper_bound-f1
+        else:
+            return f1 
 
 
-
+@register_surrogate('multiclass_f1')
+class MulticlassF1Surrogate:
+    def __init__(self,**kwargs) -> None:
+        self.name = kwargs.get('surrogate_name','surrogate')
+        self.weight = kwargs.get('weight',1.0)
+        self.average = kwargs.get('average','weighted')
+        self.upper_bound = kwargs.get('upper_bound',1.0)
+        self.use_max = kwargs.get('use_max',False)
+        self.mode = kwargs.get('mode','min')
+        self.target_groups = None
+        self.group_name = None
+        
+    def __call__(self,**kwargs):
+        labels = kwargs.get('labels')
+        probabilities = kwargs.get('probabilities')
+        assert probabilities is not None, 'probabilities must be provided'
+        # Controllo NaN nei probabilities
+        if torch.isnan(probabilities).any():
+            print('Probabilities contengono NaN!')
+            probabilities = torch.nan_to_num(probabilities, nan=0.0)  # Sostituisci NaN nei logits
+        
+    
+        f1 = multiclass_f1_score(probabilities,
+                                 labels=labels,
+                                average=self.average)
+        
+        if self.mode == 'min':
+            if self.use_max:
+                return torch.max(torch.zeros_like(f1),self.upper_bound-f1)
+            return self.upper_bound-f1
+        else:
+            return f1 
 @register_surrogate('binary_true_positive')
 class BinaryTruePositiveSurrogate:
     def __init__(self,**kwargs) -> None:

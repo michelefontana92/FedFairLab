@@ -23,10 +23,13 @@ def average_dictionary_list(dictionary_list):
 
 def scoring_function(results,use_training=False,weight_constraint=10):
     prefix = 'train' if use_training else 'val'
-    score = 1-results[f'{prefix}_objective_fn']
+    score = results[f'{prefix}_objective_fn']
+    #print(f'Score before constraints: {score}')
    # print(f'Val constraints:',results['val_constraints'])
     for constraint in results[f'{prefix}_constraints']:
         score -= constraint*weight_constraint
+        #print(f'constraint: {constraint}, updated score: {score}')
+    #print(f'Score after constraints: {score}')
     return score
 
 def collect_local_results(**kwargs):
@@ -90,7 +93,8 @@ def compute_global_score(**kwargs):
         original_threshold_list = kwargs.get('original_threshold_list')
         results = kwargs.get('eval_results')
         assert results is not None, "Evaluation results are required"
-        
+        #print(f'[INFO] Global evaluation results: {results}')
+        #print(f'[INFO] Original thresholds: {original_threshold_list}')
        
         #print('Results:',results)
         global_results = {k:[] for k in results[0].keys()}
@@ -105,8 +109,9 @@ def compute_global_score(**kwargs):
                 global_scores[k] = average_dictionary_list(v)
             else: 
                 global_scores[k] = np.mean(np.array(v),axis=0)
-             
+        #print()     
         #print("Global results:",global_scores)
+        #print()
         if len(original_threshold_list) > 0:
             for kind,res_list in global_scores.items():
                 #if kind in ['train_constraints','val_constraints']:

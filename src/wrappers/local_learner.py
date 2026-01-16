@@ -6,7 +6,7 @@ import os
 from entmax import entmax_bisect
 from metrics import Performance,GroupFairnessMetric
 import copy
-
+import time
 
 class EarlyStoppingException(Exception):
     pass
@@ -73,6 +73,7 @@ class LocalLearner(TorchNNWrapper):
         self.objective_multiplier_0 = torch.tensor(self.objective_multiplier_0_value, device=self.device)
         self.lambda0_max_value = kwargs.get('lambda0_max_value', 0.1)
         self.target_groups = set()
+        self.all_group_ids = kwargs.get('all_group_ids')
 
         self.teachers_kwargs = {'train':{},
                                 'val':{}
@@ -98,11 +99,12 @@ class LocalLearner(TorchNNWrapper):
                   
         assert self.macro_constraints_list is not None, f'{self.macro_constraints_list} has to be provided'
         self.group_cardinality = None
+        #print('Device:', self.device)
         #print('Device:',self.device)
         self._init_alm_parameters()
-        
-       
-
+        self.all_groups_name = [group_name for group_name in self.target_groups]
+        #print(f'[INFO] Inequality constraints: {self.inequality_constraints_fn_list}')
+        #print(f'[INFO] Macro constraints: {self.macro_constraints_list}')
         def init_weights(m):
             if isinstance(m, torch.nn.Linear):
                 torch.nn.init.xavier_normal_(m.weight)
@@ -110,7 +112,13 @@ class LocalLearner(TorchNNWrapper):
                     torch.nn.init.zeros_(m.bias)
         
         self.model.apply(init_weights)
+        self.subtract_upper_bound = kwargs.get('subtract_upper_bound', True)
     
+    def reset(self):
+        for checkpoint in self.checkpoints:
+            checkpoint.reset()
+        for checkpoint in self.lagrangian_checkpoints:
+            checkpoint.reset()
     def set_wasserstein_teachers_kwargs(self,teachers_kwargs):
         #print('Setting Wasserstein kwargs:',teachers_kwargs)
         self.wasserstein_kwargs.update(teachers_kwargs)
@@ -163,17 +171,18 @@ class LocalLearner(TorchNNWrapper):
         return new_lambdas
 
     
-   
-    
     def update_alm_parameters_and_metrics(self, update_alm=True,**kwargs):
         metrics = {}
         self.model.eval()
         with torch.no_grad():
-            kwargs = {}   
-            val_loader = self.data_module.val_loader(batch_size=None)
-            val_kwargs = self._compute_kwargs_in_batches(val_loader, self.model,use_entmax=False,use_training=False)
-            kwargs['val_kwargs'] = val_kwargs
-              
+            kwargs = {}
+            val_kwargs = kwargs.get('val_kwargs')
+            if val_kwargs is None:   
+                val_loader = self.data_module.val_loader(batch_size=512)
+                val_kwargs = self._compute_kwargs_in_batches(val_loader, self.model,use_entmax=False,use_training=False)
+                kwargs['val_kwargs'] = val_kwargs
+                #print(f'[INFO] Probabilities: {val_kwargs["probabilities"][:5,:]}')
+                #print(f'[INFO] Inequality constraints: {val_kwargs["inequality_constraints"]}')
             if update_alm:
                 train_loader = self.data_module.train_loader_eval(batch_size=None)
                 train_kwargs = self._compute_kwargs_in_batches(train_loader, self.model,use_entmax=False,use_training=True)          
@@ -254,8 +263,9 @@ class LocalLearner(TorchNNWrapper):
         equality_constraints = kwargs.get('equality_constraints')
         #print('Original_objective function',objective_function.item())
         # Inizializza lo score con la funzione obiettivo
-        score = 1-objective_function.clone()
-        
+       
+        score = objective_function.clone()
+        #print(f'[INFO] Score before constraints: {score.item()}')
         # Inizializza una variabile per il conteggio delle violazioni dei vincoli
         total_penalty = 0
         # Penalità per vincoli di disuguaglianza
@@ -264,11 +274,13 @@ class LocalLearner(TorchNNWrapper):
                 if len(macro_constraint) > 0:
                     inequality_penalty = torch.max(torch.clamp(inequality_constraints[macro_constraint], min=0))   
                     total_penalty += inequality_penalty*self.gamma_constraint
-                   
+                    #print(f'[INFO] Inequality Penalty for macro constraint {macro_constraint}: {inequality_penalty.item()}')
+        
         if len(equality_constraints)> 0:
             equality_penalty = torch.max(torch.abs(equality_constraints))
             total_penalty += equality_penalty * self.gamma_constraint
         score -= total_penalty
+        #print(f'Final Score after constraints: {score.item()}')
         #if total_penalty > 0:
         #    print('Total Penalty:',total_penalty)
         #print('Total Penalty:',total_penalty)
@@ -277,49 +289,35 @@ class LocalLearner(TorchNNWrapper):
 
        
     def compute_loss_fn(self, **kwargs):
-        objective_function = kwargs['objective_function']
+        loss = kwargs['objective_function'].clone()
+        if torch.isnan(loss).any():
+            raise ValueError("NaN nella loss!")
+
         batch_objective_function = kwargs['batch_objective_function']
+        group_ids = kwargs.get('group_ids', {})
         equality_constraints = kwargs.get('equality_constraints')
         inequality_constraints = kwargs.get('inequality_constraints')
-        group_ids = kwargs.get('group_ids')
 
-        assert group_ids is not None, 'Group ids must be provided'
-        
-        loss = objective_function.clone()
-        if torch.isnan(loss).any():
-            raise ValueError("NaN trovato nella loss!")
-        group_losses = []
-
-        for group_name in self.target_groups:
-            group_tensor = group_ids[group_name]  # shape [B]
-            unique_group_ids = torch.unique(group_tensor)
-
+        if self.target_groups and group_ids:
+            group_losses = []
             total_weight = 0.0
-            for group_id in unique_group_ids:
-                mask = group_tensor == group_id
-                if mask.sum() > 0:
-                    group_loss = batch_objective_function[mask].mean()
-                    weight = 1.0 - mask.sum().item() / batch_objective_function.shape[0]
-                    group_losses.append(weight * group_loss)
-                    total_weight += weight
+            for group_name in self.target_groups:
+                group_tensor = group_ids[group_name]
+                for group_id in torch.unique(group_tensor):
+                    mask = group_tensor == group_id
+                    if mask.sum() > 0:
+                        group_loss = batch_objective_function[mask].mean()
+                        weight = 1.0 - mask.sum().item() / batch_objective_function.shape[0]
+                        group_losses.append(weight * group_loss)
+                        total_weight += weight
+            if group_losses and total_weight > 0:
+                loss += torch.stack(group_losses).sum() / total_weight
 
-        if len(group_losses) > 0:
-            stacked_group_losses = torch.stack(group_losses)
-            if torch.isnan(stacked_group_losses).any():
-                print("NaN in group_losses:", stacked_group_losses)
-            if total_weight > 0:
-                loss += stacked_group_losses.sum() / total_weight
-            else:
-                print("total_weight is zero — skipping group loss contribution")
-
-        
-        # === Equality constraints
         if equality_constraints is not None and len(self.equality_constraints_fn_list) > 0:
-            equality_penalty = torch.mean(torch.abs(equality_constraints)) * self.mu
-            equality_lagrange = (self.equality_lambdas * equality_constraints).sum()
-            loss += equality_penalty + equality_lagrange
+            penalty = torch.mean(torch.abs(equality_constraints)) * self.mu
+            lagrange = (self.equality_lambdas * equality_constraints).sum()
+            loss += penalty + lagrange
 
-        # === Inequality constraints
         if inequality_constraints is not None and len(self.inequality_constraints_fn_list) > 0:
             if torch.any(self.inequality_lambdas > 0):
                 penalty = torch.sum(torch.clamp(inequality_constraints, min=0))
@@ -328,171 +326,154 @@ class LocalLearner(TorchNNWrapper):
                 loss += penalty + lagrange
 
         if torch.isnan(loss).any():
-            raise ValueError("NaN trovato nella loss!")
+            raise ValueError("NaN nella loss finale!")
 
         return loss
 
+
     
-    def _compute_kwargs_in_batches(self, loader, model, use_entmax=True,use_training=False):
+    def _compute_kwargs_in_batches(self, loader, model, use_entmax=True, use_training=False):
         all_logits = []
         all_labels = []
-        all_group_ids = {group_name: [] for group_name in loader.dataset[0]['groups'].keys()}
-        all_group_ids_list = {group_name: [] for group_name in loader.dataset[0]['groups_ids_list'].keys()}
-        all_group_masks = {group_name: [] for group_name in loader.dataset[0]['groups'].keys()}
-        all_positive_masks = []
         all_indices = []
+        all_positive_masks = []
+        if self.all_group_ids is not None:
+            all_group_ids = {group_name: [] for group_name in self.all_group_ids.keys()}
+            all_group_ids_list = {group_name: [] for group_name in self.all_group_ids.keys()}
+            #print("[INFO] Collected all group IDs and their corresponding lists.")
+            
+        else:
+            if self.target_groups:
+                all_group_ids = {group_name: [] for group_name in loader.dataset[0]['groups'].keys() if group_name in self.target_groups}
+                all_group_ids_list = {group_name: [] for group_name in loader.dataset[0]['groups_ids_list'].keys() if group_name in self.target_groups}
+            else:
+                print("[INFO] No target groups specified, skipping group collection.")
+                all_group_ids = {}
+                all_group_ids_list = {}
 
-        
-        
-       
         for batch in loader:
-            inputs = batch['data'].float().to(self.device)  
-            outputs = model(inputs)  
-            all_indices.append(batch['index'])
+            inputs = batch['data'].float().to(self.device)
+            outputs = model(inputs)
 
             all_logits.append(outputs)
             all_labels.append(batch['labels'].to(self.device))
-            
-
-           
-            for group_name in batch['groups'].keys():
-                all_group_ids[group_name].append(batch['groups'][group_name].to(self.device))
-                all_group_masks[group_name].append(batch['groups'][group_name].to(self.device))
-            
-            
-            for group_name in batch['groups_ids_list'].keys():
-                all_group_ids_list[group_name].append(batch['groups_ids_list'][group_name].to(self.device))
-            
+            all_indices.append(batch['index'])
             all_positive_masks.append(batch['positive_mask'].to(self.device))
 
-        
+            if self.target_groups or self.all_group_ids is not None:
+                for group_name in all_group_ids:
+                    all_group_ids[group_name].append(batch['groups'][group_name].to(self.device))
+                for group_name in all_group_ids_list:
+                    all_group_ids_list[group_name].append(batch['groups_ids_list'][group_name].to(self.device))
+
         final_logits = torch.cat(all_logits, dim=0)
         final_labels = torch.cat(all_labels, dim=0)
-        
-        final_group_ids = {group_name: torch.cat(all_group_ids[group_name], dim=0) for group_name in all_group_ids}
-        final_group_ids_list = {group_name: torch.cat(all_group_ids_list[group_name], dim=0) for group_name in all_group_ids_list}
-        final_positive_masks = torch.cat(all_positive_masks, dim=0)
         final_indices = torch.cat(all_indices, dim=0)
+        final_positive_masks = torch.cat(all_positive_masks, dim=0)
 
-       
-        kwargs = {
+        if self.all_group_ids is not None:
+            final_group_ids = {g: torch.cat(all_group_ids[g], dim=0) for g in all_group_ids} 
+            final_group_ids_list = {g: torch.cat(all_group_ids_list[g], dim=0) for g in all_group_ids_list}
+        else:
+            final_group_ids = {g: torch.cat(all_group_ids[g], dim=0) for g in all_group_ids} if self.target_groups else {}
+            final_group_ids_list = {g: torch.cat(all_group_ids_list[g], dim=0) for g in all_group_ids_list} if self.target_groups else {}
+
+        batch_dict = {
             'logits': final_logits,
             'labels': final_labels,
             'groups': final_group_ids,
             'groups_ids_list': final_group_ids_list,
             'positive_mask': final_positive_masks,
             'index': final_indices,
-            
         }
 
-        kwargs = self._compute_kwargs(kwargs, final_logits, use_entmax=use_entmax,use_training=use_training)
-        
-        return kwargs
+        return self._compute_kwargs(batch_dict, final_logits, use_entmax=use_entmax, use_training=use_training)
 
-    def _compute_kwargs(self, batch, outputs, use_entmax=True,use_training=False):
-        
+    def _compute_kwargs(self, batch, outputs, use_entmax=True, use_training=False):
         device = self.device
-        
-        group_ids = {group_name: batch['groups'][group_name].to(device) for group_name in batch['groups'].keys()}
-        
-       
-        if 'groups_ids_list' in batch:
-            group_ids_list = {group_name: batch['groups_ids_list'][group_name].to(device) for group_name in batch['groups_ids_list'].keys()}
-        else:
-            raise ValueError("'groups_ids_list' non è presente nel batch. Verifica la struttura del dataset.")
 
-        
-        positive_mask = batch.get('positive_mask', None)
+        # === Gruppi (fairness): opzionali ===
+        if self.all_group_ids is not None:
+            group_ids = {g: batch['groups'][g].to(device) for g in self.all_group_ids.keys()} 
+            group_ids_list = {g: batch['groups_ids_list'][g].to(device) for g in self.all_group_ids.keys()} 
+        else:
+            group_ids = {g: batch['groups'][g].to(device) for g in batch.get('groups', {})} if self.target_groups else {}
+            group_ids_list = {g: batch['groups_ids_list'][g].to(device) for g in batch.get('groups_ids_list', {})} if self.target_groups else {}
+
+        # === Mask e label: obbligatori ===
+        positive_mask = batch.get('positive_mask')
         if positive_mask is None:
             raise ValueError("'positive_mask' non è presente nel batch.")
         positive_mask = positive_mask.to(device)
 
-        labels = batch.get('labels', None)
+        labels = batch.get('labels')
         if labels is None:
             raise ValueError("'labels' non è presente nel batch.")
         labels = labels.to(device)
 
+        # === Predizioni ===
         predictions = torch.argmax(outputs, dim=-1)
-        
-        if use_entmax:
-            probabilities = entmax_bisect(outputs, alpha=1.5, dim=-1)
-        else:
-            probabilities = torch.nn.functional.one_hot(predictions, num_classes=outputs.size(-1)).float()
-        
-        output_distribution = torch.nn.functional.softmax(outputs/1.0, dim=-1)
-       
-        if torch.isnan(probabilities).any():
-            raise ValueError('Probabilità contiene NaN!')
-       
-
+      
+        probabilities = (
+            entmax_bisect(outputs*10, alpha=1.5, dim=-1)
+            if use_entmax else
+            torch.nn.functional.one_hot(predictions, num_classes=outputs.size(-1)).float()
+        )
+        #print(f'[LL] Outputs head: {outputs[:5,:]}')
+        #print(f'[LL] Probabilities head: {probabilities[:5,:]}')
+        output_distribution = torch.nn.functional.softmax(outputs, dim=-1)
+        #print(f"[INFO] Output distribution: {output_distribution[:5,:]}, Predictions shape: {predictions[:5]}")
+        # === Base kwargs ===
         kwargs = {
-            'group_ids': group_ids,  
-            'group_ids_list': group_ids_list, 
-            'group_masks': group_ids,  
-            'positive_mask': positive_mask,  
-            'logits': outputs,  
-            'labels': labels,  
-            'probabilities': probabilities,  
+            'group_ids': group_ids,
+            'group_ids_list': group_ids_list,
+            'group_masks': group_ids,
+            'positive_mask': positive_mask,
+            'logits': outputs,
+            'labels': labels,
+            'probabilities': probabilities,
             'predictions': predictions,
             'output_distribution': output_distribution,
         }
 
-        teacher_kwargs = self.teachers_kwargs['train'] if use_training else self.teachers_kwargs['val']
-        if 'index' in batch:
-            indices = batch['index']
+        # === Allineamento teacher/wasserstein se index è presente ===
+        indices = batch.get('index', None)
+        if indices is not None and indices.numel() > 0:
+            max_index = indices.max().item()
+            teacher_kwargs = self.teachers_kwargs['train'] if use_training else self.teachers_kwargs['val']
+            for k, v in teacher_kwargs.items():
+                if isinstance(v, torch.Tensor) and v.dim() >= 2 and v.shape[1] > max_index:
+                    kwargs[k] = v[:, indices, ...]
+            wasserstein_kwargs = self.wasserstein_kwargs['train'] if use_training else self.wasserstein_kwargs['val']
+            for k, v in wasserstein_kwargs.items():
+                if isinstance(v, torch.Tensor) and v.dim() >= 2 and v.shape[1] > max_index:
+                    kwargs[f'wasserstein_{k}'] = v[:, indices, ...]
         else:
-            raise ValueError("Missing 'index' in batch — required to align teacher_kwargs")
-        
-        #print('Indices shape:',indices.shape)
-        #print('Teacher kwargs:',teacher_kwargs)
-        #print('Max indices: ',torch.max(indices))
-        #for key,v in teacher_kwargs.items():
-         #   print(f"Key: {key}, Shape: {v.shape}")
-        filtered_teacher_kwargs = {}
-        for k, v in teacher_kwargs.items():
-            if isinstance(v, torch.Tensor) and v.numel() > 0:
-                if v.dim() >= 2 and v.shape[1] >= indices.max().item() + 1:
-                    filtered_teacher_kwargs[k] = v[:, indices, ...]  # seleziona il batch corretto
-                else:
-                    print(f"[WARNING] Skipping teacher key {k}: shape={v.shape}, indices max={indices.max().item()}")
-                    filtered_teacher_kwargs[k] = v
-            else:
-                filtered_teacher_kwargs[k] = v
+            print("[INFO] No valid indices — skipping teacher/wasserstein alignment.")
 
-        wasserstein_kwargs = self.wasserstein_kwargs['train'] if use_training else self.wasserstein_kwargs['val']
-        filtered_wasserstein_kwargs = {}
-        for k, v in wasserstein_kwargs.items():
-            if isinstance(v, torch.Tensor) and v.numel() > 0:
-                if v.dim() >= 2 and v.shape[1] >= indices.max().item() + 1:
-                    filtered_wasserstein_kwargs[f'wasserstein_{k}'] = v[:, indices, ...]  # seleziona il batch corretto
-                else:
-                    print(f"[WARNING] Skipping teacher key {k}: shape={v.shape}, indices max={indices.max().item()}")
-                    filtered_wasserstein_kwargs[f'wasserstein_{k}'] = v
-            else:
-                filtered_wasserstein_kwargs[f'wasserstein_{k}'] = v
-        #print('Filtered teacher kwargs:',filtered_teacher_kwargs)
-        #for key in filtered_teacher_kwargs:
-            #print(f"Key: {key}, Shape: {filtered_teacher_kwargs[key].shape}")
-        kwargs.update(filtered_teacher_kwargs)
-        kwargs.update(filtered_wasserstein_kwargs)
-        #kwargs.update(teacher_kwargs)
+        empty_shape = (0, outputs.shape[0], outputs.shape[1])  # es: (0, batch_size, num_classes)
+        for key in [
+            'teacher_logits_list',
+            'teacher_probabilities',
+            'teacher_predictions_list',
+            'teacher_softmax_list',
+        ]:
+            if key not in kwargs:
+                kwargs[key] = torch.empty(empty_shape, device=device)
 
-        objective_fn_value = self.objective_fn(**kwargs)
-        inequality_constraints, equality_constraints = self.compute_constraints(**kwargs)
-        
-        original_objective_fn_value = self.original_objective_fn(**kwargs)
-        batch_objective_fn_value = self.batch_objective_function(**kwargs)
-       
-        kwargs['inequality_constraints'] = inequality_constraints
-        kwargs['equality_constraints'] = equality_constraints
-        kwargs['objective_function'] = objective_fn_value
-        kwargs['batch_objective_function'] = batch_objective_fn_value
-        kwargs['original_objective_function'] = original_objective_fn_value
-    
+        #print(f"[INFO] Keys in kwargs: {list(kwargs.keys())}")
+        # === Funzioni surrogate e constraint ===
+        kwargs['objective_function'] = self.objective_fn(**kwargs)
+        kwargs['original_objective_function'] = self.original_objective_fn(**kwargs)
+        kwargs['batch_objective_function'] = self.batch_objective_function(**kwargs)
+        kwargs['inequality_constraints'], kwargs['equality_constraints'] = self.compute_constraints(**kwargs)
+
         return kwargs
+
 
     def _compute_metrics(self,metrics,prefix='val',**kwargs):
         group_ids = kwargs['group_ids']
+        #print('[COMPUTE METRICS] Group ids:', group_ids.keys())
         y_pred = kwargs['predictions']
         y_true = kwargs['labels']
 
@@ -578,7 +559,7 @@ class LocalLearner(TorchNNWrapper):
         self.model.load_state_dict(model_dict)
         self.model.eval()
         self.model.to(self.device)
-        metrics = self.update_alm_parameters_and_metrics(update_alm=False) 
+        metrics = self.update_alm_parameters_and_metrics(update_alm=False,**kwargs) 
         self.model.load_state_dict(original_model_dict)
       
         return metrics 
@@ -591,13 +572,69 @@ class LocalLearner(TorchNNWrapper):
         if use_training:
            loader = self.data_module.train_loader_eval(batch_size=None)
         else:
-            loader = self.data_module.val_loader(batch_size=None)
+            loader = self.data_module.val_loader(batch_size=512)
         kwargs = self._compute_kwargs_in_batches(loader, self.model,use_entmax=False,use_training=use_training)
         self.model.load_state_dict(original_model_dict)
         self.model.to(self.device)
         return kwargs
     
-    def compute_violations(self,val_kwargs,**kwargs):
+    def compute_violations(self, val_kwargs, **kwargs):
+        inequality_constraints, equality_constraints = self.compute_constraints(**val_kwargs)
+        results = {}
+
+        violations = {k: None for k, _ in enumerate(self.macro_constraints_list)}
+        
+        violations_per_group_list = {}
+        violations_per_group = {}
+        for key, value_dict in self.group_cardinality.items():
+            violations_per_group_list[key] = {k: [] for k in value_dict.keys()}
+        
+        for i, constraint_violation in enumerate(inequality_constraints):
+            constraint = self.inequality_constraints_fn_list[i]
+            target_groups = constraint.target_groups
+            group_name = constraint.group_name
+            if group_name is not None:
+                for group in target_groups:
+                    try:
+                        violations_per_group_list[group_name][group.item()].append(constraint_violation)
+                    except KeyError:
+                        # Manteniamo il fallback originale, ma inizializziamo a lista -> niente RuntimeError
+                        if group_name not in violations_per_group_list:
+                            violations_per_group_list[group_name] = {}
+                        if group.item() not in violations_per_group_list[group_name]:
+                            violations_per_group_list[group_name][group.item()] = []
+                        violations_per_group_list[group_name][group.item()].append(constraint_violation)
+
+        # --- FIX MINIMALE: calcolo per-dizionario, nessun try/except che schiaccia a scalare ---
+        for key, value_dict in violations_per_group_list.items():
+            per_group = {}
+            for gid, v in value_dict.items():
+                if len(v) > 0:
+                    per_group[gid] = torch.stack(v).max().item()
+                else:
+                    # nessun contributo per quel group_id: lasciamo 0.0 come default
+                    per_group[gid] = 0.0
+            violations_per_group[key] = per_group
+        # --------------------------------------------------------------------------------------
+
+        results['violations_per_group'] = copy.deepcopy(violations_per_group)
+        
+        for i, macro_constraint in enumerate(self.macro_constraints_list):
+            violations[i] = inequality_constraints[macro_constraint].detach().cpu().numpy()
+        
+        results['inequality_constraints_violations'] = inequality_constraints.detach().cpu().numpy()
+
+        macro_constraints_violation = copy.deepcopy(violations)
+        for i, _ in enumerate(self.macro_constraints_list):
+            if len(macro_constraints_violation[i]) > 0:
+                macro_constraints_violation[i] = [macro_constraints_violation[i].max()]
+            else:
+                macro_constraints_violation[i] = []
+        results['macro_constraints_violations'] = copy.deepcopy(macro_constraints_violation)
+        
+        return results
+
+    def compute_violations_old(self,val_kwargs,**kwargs):
         inequality_constraints, equality_constraints = self.compute_constraints(**val_kwargs)
         results = {}
 
@@ -660,7 +697,7 @@ class LocalLearner(TorchNNWrapper):
             print(f'Macro constraints:',self.macro_constraints_list)
         num_epochs = kwargs.get('num_epochs', -1)
         disable_log = kwargs.get('disable_log', False)
-        evaluate_best_model = kwargs.get('evaluate_best_model', True)
+        evaluate_best_model = kwargs.get('evaluate_best_model', False)
         n_rounds = self.num_epochs if num_epochs == -1 else num_epochs
         
         self.teacher_model_list = kwargs.get('teacher_model_list',[])
@@ -671,9 +708,9 @@ class LocalLearner(TorchNNWrapper):
         if start_model_dict is not None:
             self.model.load_state_dict(copy.deepcopy(start_model_dict))
         
-
+        #print(f'[{self.id}]:Training model with parameters:',self.model.state_dict()['fc1.weight'][:5,:])
         self.model.to(self.device)
-       
+        
         """
         metrics = self.update_alm_parameters_and_metrics(update_alm=True) 
         for checkpoint in self.checkpoints:
@@ -696,13 +733,15 @@ class LocalLearner(TorchNNWrapper):
         self.optimizer = self.optimizer_fn(self.model.parameters())
         
         try:
+            start = time.time()
             for epoch in self._progress_bar(range(n_rounds), desc=f'Epoch 0/{n_rounds}', total=n_rounds, unit='epoch'):
                 train_loader = self.data_module.train_loader()
                 batch_iterator = self._progress_bar(train_loader, desc=f'Epoch {epoch+1}/{n_rounds}', leave=False)
                 for batch_idx, batch in enumerate(batch_iterator):
                     self._training_step(batch, batch_idx)
 
-                with torch.no_grad():                    
+                with torch.no_grad():
+                    #metrics = self.update_alm_parameters_and_metrics(update_alm=False,**kwargs)                    
                     metrics = self.update_alm_parameters_and_metrics(update_alm=True,**kwargs)
                     
                     # Early stopping e model checkpoint
@@ -738,14 +777,17 @@ class LocalLearner(TorchNNWrapper):
                 if os.path.exists(checkpoint.get_model_path()):
                     self.load(checkpoint.get_model_path())
         
+        end = time.time()  
+        print(f'[{self.id}]:Training completed in {end - start:.2f} seconds.')
+        """
         if evaluate_best_model:
             self.model.eval()
            
-            metrics = self.update_alm_parameters_and_metrics(update_alm=True,**kwargs)
+            metrics = self.update_alm_parameters_and_metrics(update_alm=False,**kwargs)
             final_metrics = {f'final_{name}': value for name, value in metrics.items()}
             if not disable_log:
                self.logger.log(final_metrics)
-
+        """
         #print('Final lambdas:',self.inequality_lambdas)  
         return copy.deepcopy(self.model.state_dict()),self.final_inequality_lambdas, self.final_equality_lambdas
 
@@ -761,7 +803,7 @@ class LocalLearner(TorchNNWrapper):
             if use_training:
                 loader = self.data_module.train_loader_eval(batch_size=None)
             else:
-                loader = self.data_module.val_loader(batch_size=None)
+                loader = self.data_module.val_loader(batch_size=512)
             
             for teacher_model_dict in teacher_model_dict_list:
                 teacher_model = copy.deepcopy(self.model)

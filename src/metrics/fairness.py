@@ -65,23 +65,24 @@ class GroupFairnessMetric(BaseMetric):
     
         self.stats_per_group = {}
         for group_id in group_ids[self.group_name]:
-            self.stats_per_group[group_id] = StatisticScores(task=task,
+            self.stats_per_group[group_id] = StatisticScores(task='binary',
                                                              num_classes=2)
         self.stats_per_class = {}
         for current_class in range(self.num_classes):
             self.stats_per_class[current_class] = {}
             for group_id in group_ids[self.group_name]:
-                self.stats_per_class[current_class][group_id] = StatisticScores(task=task,
+                self.stats_per_class[current_class][group_id] = StatisticScores(task='binary',
                                                              num_classes=2)
 
     def calculate(self, y_pred, y_true, group_ids:dict):
+        #print('Group ids: ',group_ids.keys())
         current_group_ids:list = group_ids[self.group_name]
         #print('Current group ids: ',current_group_ids)
         y_pred = y_pred.to(self.device)
         y_true = y_true.to(self.device)
         assert len(y_pred) == len(y_true) == len(current_group_ids), "y_pred, y_true and group_ids must have the same length"
-        
-        if not self.use_multiclass:
+        #print(f'Group IDs: { torch.unique(current_group_ids)}')
+        if self.num_classes == 2:
             
             for group_id in torch.unique(current_group_ids):
                 if group_id != -1:
@@ -91,23 +92,18 @@ class GroupFairnessMetric(BaseMetric):
                     y_true_group = y_true[current_group_ids==group_id.item()]
                     self.stats_per_group[group_id.item()].calculate(y_pred_group, y_true_group)
         else:
+            #print(f'[METRIC] Predictions: {y_pred[:5]}, True labels: {y_true[:5]}, Group IDs: {current_group_ids[:5]}')
             for current_class in range(self.num_classes):
                 y_pred_class = torch.where(y_pred==current_class,1,0)
                 y_true_class = torch.where(y_true==current_class,1,0)
-                """
-                print('Current class: ',current_class)
-                print('y_true: ',y_true[:5])
-                print('y_true_class: ',y_true_class[:5])
-                print('y_pred: ',y_pred[:5])
-                print('y_pred_class: ',y_pred_class[:5])
-                print()
-                """
                 for group_id in torch.unique(current_group_ids):
                     if group_id != -1:
                         y_pred_group = y_pred_class[current_group_ids==group_id.item()]
                         y_true_group = y_true_class[current_group_ids==group_id.item()]
-                        self.stats_per_class[current_class][group_id.item()].calculate(y_pred_group, y_true_group)
-    
+                        #self.stats_per_class[current_class][group_id.item()].calculate(y_pred_group, y_true_group)
+                        if y_pred_group.numel() > 0:
+                            self.stats_per_class[current_class][group_id.item()].calculate(y_pred_group, y_true_group)
+
     def get(self,normalize=False):
        pass
 
@@ -132,55 +128,60 @@ class DemographicParity(GroupFairnessMetric):
         for current_class in range(self.num_classes):
             self.stats_per_class_group_diff[current_class] = []
 
-        
-    
-       
-    def get(self):
-        if not self.use_multiclass:
-            group_ids = [
-                gid for gid in self.stats_per_group.keys()
-                if (self.stats_per_group[gid].stat_scores.tp +
-                    self.stats_per_group[gid].stat_scores.fp +
-                    self.stats_per_group[gid].stat_scores.tn +
-                    self.stats_per_group[gid].stat_scores.fn) > 0
-            ]
-
-            for i in range(len(group_ids)):
-                for j in range(i+1,len(group_ids)):
-                    self.stats_per_group_diff.append(
-                        abs(self.stats_per_group[group_ids[i]].get()['base_rate'] - self.stats_per_group[group_ids[j]].get()['base_rate']))
-                    
             
+    def get(self):
+        if self.num_classes == 2:
+           
+            #print('Number of groups with valid stats:', len(group_ids))
+
+            for i in range(len(self.stats_per_group.keys())-1):
+                for j in range(i+1,len(self.stats_per_group.keys())):
+                    stats_group_i = self.stats_per_group[i].get()
+                    stats_group_j = self.stats_per_group[j].get()
+                    support_i = stats_group_i["tp"] + stats_group_i["fp"] + stats_group_i["tn"] + stats_group_i["fn"]
+                    support_j = stats_group_j["tp"] + stats_group_j["fp"] + stats_group_j["tn"] + stats_group_j["fn"]
+                    is_empty_i = support_i == 0
+                    is_empty_j = support_j == 0
+                    if (not is_empty_i) and (not is_empty_j):
+                       self.stats_per_group_diff.append(
+                           abs(stats_group_i['base_rate'] - stats_group_j['base_rate']))
+                    else:
+                        print(f'Skipping group {i} and {j} due to empty stats')
             return {
                     f'demographic_parity_{self.group_name}':self._reduction(
                         torch.tensor(self.stats_per_group_diff))
                     }
         else: 
             group_ids = [
-                gid for gid in self.stats_per_group.keys()
-                if (self.stats_per_group[gid].stat_scores.tp +
-                    self.stats_per_group[gid].stat_scores.fp +
-                    self.stats_per_group[gid].stat_scores.tn +
-                    self.stats_per_group[gid].stat_scores.fn) > 0
+                gid for gid in self.stats_per_class[0].keys()
+                if any(
+                    self.stats_per_class[c][gid].stat_scores.tp +
+                    self.stats_per_class[c][gid].stat_scores.fp +
+                    self.stats_per_class[c][gid].stat_scores.tn +
+                    self.stats_per_class[c][gid].stat_scores.fn > 0
+                    for c in range(self.num_classes)
+                )
             ]
 
+          
             for current_class in range(self.num_classes):
                 for i in range(len(group_ids)):
                     for j in range(i+1,len(group_ids)):
-                        self.stats_per_class_group_diff[current_class].append(
-                            abs(self.stats_per_class[current_class][group_ids[i]].get()['base_rate'] - self.stats_per_class[current_class][group_ids[j]].get()['base_rate']))
-
-                dp = self._reduction(torch.tensor(self.stats_per_class_group_diff[current_class]))
-                self.metrics_per_class.append(dp)
-            """
-            print('Attribute: ',self.group_name)
-            for i in range(len(group_ids)):
-                print('Group: ',group_ids[i])
-                for c in range(self.num_classes):
-                    br = self.stats_per_class[c][group_ids[i]].get()["base_rate"]
-                    print(f'Class {c}: base rate: {br}')
-            print()      
-            """
+                        stats_group_i = self.stats_per_class[current_class][group_ids[i]].get()
+                        stats_group_j = self.stats_per_class[current_class][group_ids[j]].get()
+                        is_empty_i = stats_group_i["tp"] + stats_group_i["fp"] + stats_group_i["tn"] + stats_group_i["fn"] == 0
+                        is_empty_j = stats_group_j["tp"] + stats_group_j["fp"] + stats_group_j["tn"] + stats_group_j["fn"] == 0
+                        if (not is_empty_i) and (not is_empty_j):
+                         
+                            self.stats_per_class_group_diff[current_class].append(
+                            abs(stats_group_i['base_rate'] - stats_group_j['base_rate'])
+                            )
+                
+                
+                if len(self.stats_per_class_group_diff[current_class]) > 0:
+                    dp = self._reduction(torch.tensor(self.stats_per_class_group_diff[current_class]))
+                    self.metrics_per_class.append(dp)
+           
             return {
                     f'demographic_parity_{self.group_name}':self._reduction(
                         torch.tensor(self.metrics_per_class))
@@ -206,30 +207,42 @@ class EqualOpportunity(GroupFairnessMetric):
             self.stats_per_class_group_diff[current_class] = []
 
     def get(self):
-        if not self.use_multiclass: 
-            group_ids = list(self.stats_per_group.keys())
-            for i in range(len(group_ids)):
-                for j in range(i+1,len(group_ids)):
-                    self.stats_per_group_diff.append(abs(self.stats_per_group[group_ids[i]].get()['tpr'] - self.stats_per_group[group_ids[j]].get()['tpr']))
+        if self.num_classes == 2:
+            for i in range(len(self.stats_per_group)-1):
+                for j in range(i+1,len(self.stats_per_group)):
+                    self.stats_per_group_diff.append(abs(self.stats_per_group[i].get()['tpr'] - self.stats_per_group[j].get()['tpr']))
         
             return {f'equal_opportunity_{self.group_name}':
                     self._reduction(
                         torch.tensor(self.stats_per_group_diff))
                     }
-        else: 
-            group_ids = list(self.stats_per_class[0].keys())
+        else:
+            group_ids = [
+                gid for gid in self.stats_per_class[0].keys()
+                if any(
+                    self.stats_per_class[c][gid].stat_scores.tp +
+                    self.stats_per_class[c][gid].stat_scores.fp +
+                    self.stats_per_class[c][gid].stat_scores.tn +
+                    self.stats_per_class[c][gid].stat_scores.fn > 0
+                    for c in range(self.num_classes)
+                )
+            ]
+
+          
             for current_class in range(self.num_classes):
                 for i in range(len(group_ids)):
                     for j in range(i+1,len(group_ids)):
                         self.stats_per_class_group_diff[current_class].append(
                             abs(self.stats_per_class[current_class][group_ids[i]].get()['tpr'] - self.stats_per_class[current_class][group_ids[j]].get()['tpr']))
-    
-                eo = self._reduction(torch.tensor(self.stats_per_class_group_diff[current_class]))
-                self.metrics_per_class.append(eo)
+                if len(self.stats_per_class_group_diff[current_class]) > 0:
+                    eo = self._reduction(torch.tensor(self.stats_per_class_group_diff[current_class]))
+                    self.metrics_per_class.append(eo)
+      
             return {
                     f'equal_opportunity_{self.group_name}':self._reduction(
                         torch.tensor(self.metrics_per_class))
                     }
+        
     def get_stats_per_group(self, group_id):
         return torch.tensor(
             self.stats_per_group[group_id].get()['tpr'][0].item()
@@ -257,13 +270,31 @@ class EqualizedOdds(GroupFairnessMetric):
             self.stats_per_class_group_diff_fpr[current_class] = []
        
     def get(self):
-        if not self.use_multiclass:
-            group_ids = list(self.stats_per_group.keys()) 
-            for i in range(len(group_ids)):
-                for j in range(i+1,len(group_ids)):
-                    self.stats_per_group_diff_tpr.append(abs(self.stats_per_group[group_ids[i]].get()['tpr']-self.stats_per_group[group_ids[j]].get()['tpr']))
-                    self.stats_per_group_diff_fpr.append(abs(self.stats_per_group[group_ids[i]].get()['fpr']-self.stats_per_group[group_ids[j]].get()['fpr']))
-            
+        if self.num_classes == 2: 
+            for i in range(len(self.stats_per_group.keys())-1):
+                for j in range(i+1,len(self.stats_per_group.keys())):
+                    stats_group_i = self.stats_per_group[i].get()
+                    stats_group_j = self.stats_per_group[j].get()
+                    is_empty_i = (stats_group_i['tp'] + stats_group_i['fn'] + stats_group_i['fp'] + stats_group_i['tn']) == 0
+                    is_empty_j = (stats_group_j['tp'] + stats_group_j['fn'] + stats_group_j['fp'] + stats_group_j['tn']) == 0
+                    n_gi_tpr = stats_group_i["tp"] + stats_group_i["fn"]
+                    n_gj_tpr = stats_group_j["tp"] + stats_group_j["fn"]
+                    n_gi_fpr = stats_group_i["fp"] + stats_group_i["tn"]
+                    n_gj_fpr = stats_group_j["fp"] + stats_group_j["tn"]
+                    if (not is_empty_i) and (not is_empty_j):
+                        if n_gi_tpr > 0 and n_gj_tpr > 0:
+                            #print(f'[METRIC] Diff TPR: {abs(stats_group_i["tpr"] - stats_group_j["tpr"])}, Diff FPR: {abs(stats_group_i["fpr"] - stats_group_j["fpr"])}')
+                            self.stats_per_group_diff_tpr.append(
+                                abs(stats_group_i['tpr'] - stats_group_j['tpr'])
+                            )
+                        
+                        if n_gi_fpr > 0 and n_gj_fpr > 0:
+                            #print(f'[METRIC] Diff FPR: {abs(stats_group_i["fpr"] - stats_group_j["fpr"])}')
+                            self.stats_per_group_diff_fpr.append(
+                                abs(stats_group_i['fpr'] - stats_group_j['fpr'])
+                            )
+                    
+
             return {
                 f'equalized_odds_{self.group_name}':
                 torch.max(
@@ -274,17 +305,55 @@ class EqualizedOdds(GroupFairnessMetric):
             )
             }
         else:
-            group_ids = list(self.stats_per_class[0].keys())
+            group_ids = [
+                gid for gid in self.stats_per_class[0].keys()
+                if any(
+                    self.stats_per_class[c][gid].stat_scores.tp +
+                    self.stats_per_class[c][gid].stat_scores.fp +
+                    self.stats_per_class[c][gid].stat_scores.tn +
+                    self.stats_per_class[c][gid].stat_scores.fn > 0
+                    for c in range(self.num_classes)
+                )
+            ]
+            #print(f'[INFO] Group IDs: {group_ids}')
+
+          
             for current_class in range(self.num_classes):
                 for i in range(len(group_ids)):
                     for j in range(i+1,len(group_ids)):
-                        self.stats_per_class_group_diff_tpr[current_class].append(
-                            abs(self.stats_per_class[current_class][group_ids[i]].get()['tpr'] - self.stats_per_class[current_class][group_ids[j]].get()['tpr']))
-                        self.stats_per_class_group_diff_fpr[current_class].append(
-                            abs(self.stats_per_class[current_class][group_ids[i]].get()['fpr'] - self.stats_per_class[current_class][group_ids[j]].get()['fpr']))
-                eo = torch.max(self._reduction(torch.tensor(self.stats_per_class_group_diff_tpr[current_class])),
+                        #print(f'[METRIC] Class {current_class} Group IDs: {group_ids[i]}, {group_ids[j]}')
+                        stats_group_i = self.stats_per_class[current_class][group_ids[i]].get()
+                        stats_group_j = self.stats_per_class[current_class][group_ids[j]].get()
+                        
+                        is_empty_i = (stats_group_i['tp'] + stats_group_i['fn'] + stats_group_i['fp'] + stats_group_i['tn']) == 0
+                        is_empty_j = (stats_group_j['tp'] + stats_group_j['fn'] + stats_group_j['fp'] + stats_group_j['tn']) == 0
+                        # Verifica se uno dei gruppi ha label==current_class
+                        n_gi_tpr = stats_group_i["tp"] + stats_group_i["fn"]
+                        n_gj_tpr = stats_group_j["tp"] + stats_group_j["fn"]
+
+                        n_gi_fpr = stats_group_i["fp"] + stats_group_i["tn"]
+                        n_gj_fpr = stats_group_j["fp"] + stats_group_j["tn"]
+                        if (not is_empty_i) and (not is_empty_j):
+                            if n_gi_tpr > 0 and n_gj_tpr > 0:
+                                         
+                                #print(f'[METRIC] Diff TPR: {abs(stats_group_i["tpr"] - stats_group_j["tpr"])}, Diff FPR: {abs(stats_group_i["fpr"] - stats_group_j["fpr"])}')
+                                self.stats_per_class_group_diff_tpr[current_class].append(
+                                    abs(stats_group_i['tpr'] - stats_group_j['tpr'])
+                                )
+                            
+                            if n_gi_fpr > 0 and n_gj_fpr > 0:
+                                #print(f'[METRIC] Diff FPR: {abs(stats_group_i["fpr"] - stats_group_j["fpr"])}')
+                                self.stats_per_class_group_diff_fpr[current_class].append(
+                                    abs(stats_group_i['fpr'] - stats_group_j['fpr'])
+                                )
+                             
+                if len(self.stats_per_class_group_diff_tpr[current_class]) > 0  and len(self.stats_per_class_group_diff_fpr[current_class]) > 0: 
+                    eod = torch.max(self._reduction(torch.tensor(self.stats_per_class_group_diff_tpr[current_class])),
                                self._reduction(torch.tensor(self.stats_per_class_group_diff_fpr[current_class])))
-                self.metrics_per_class.append(eo)
+            
+                    self.metrics_per_class.append(eod)
+            #for current_class,result in zip(range(self.num_classes),self.metrics_per_class):
+            #    print(f'[INFO METRIC] Equalized Odds for class {current_class} on group {self.group_name} = {result}')    
             return {
                     f'equalized_odds_{self.group_name}':self._reduction(
                         torch.tensor(self.metrics_per_class))
@@ -297,4 +366,4 @@ class EqualizedOdds(GroupFairnessMetric):
         for current_class in range(self.num_classes):
             self.stats_per_class_group_diff_tpr[current_class] = []
             self.stats_per_class_group_diff_fpr[current_class] = []
-    
+      

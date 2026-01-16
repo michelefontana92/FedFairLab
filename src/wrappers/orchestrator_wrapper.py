@@ -28,6 +28,7 @@ class OrchestratorWrapper(TorchNNWrapper):
         self.macro_constraints_list = kwargs.get("macro_constraints_list", [])
         self.target_groups = kwargs.get("target_groups", [])
         self.all_group_ids = kwargs.get("all_group_ids")
+        self.num_classes = kwargs.get("num_classes", 2)
         assert self.all_group_ids is not None, 'all_group_ids must be provided'
         
         self.aggregation_teachers_list = kwargs.get("aggregation_teachers_list", [])
@@ -67,7 +68,8 @@ class OrchestratorWrapper(TorchNNWrapper):
                 'inequality_lambdas_0_value': 0,
             }
         
-        
+        self._build_main_problem()
+    
     def set_model_params(self,model_params):
         self.model.load_state_dict(model_params)
     
@@ -90,32 +92,45 @@ class OrchestratorWrapper(TorchNNWrapper):
                                             delta=self.delta,
                                             max_constraints_in_subproblem=self.max_constraints_in_subproblem,                                            
                                             aggregation_teachers_list = self.aggregation_teachers_list,
+                                            num_classes = self.num_classes
                                            )
 
     
     
-    def fit(self, num_global_iterations=5,num_local_epochs=5,num_subproblems=5,state=None):
-        self._build_main_problem(num_subproblems=num_subproblems)
         
-        metrics = self.main_problem.evaluate(self.main_problem.model)
+    
+    def fit(self,model_params, num_global_iterations=1,num_local_epochs=5,num_subproblems=5,state=None,
+            aggregation_teachers_list=[],aggregation_weights=None):
+        
+        self.main_problem.reset()
+        self.main_problem.model.load_state_dict(model_params)
+        self.main_problem.aggregation_teachers_list = aggregation_teachers_list
+
+        print('Number of aggregation teachers:',len(self.main_problem.aggregation_teachers_list))
         if self.logger is not None:
+            metrics = self.main_problem.evaluate(self.main_problem.model)
             self.logger.log(metrics)
         
-       
         try:
             if state is None:
                 current_state = {}
             else: 
                 current_state = copy.deepcopy(state)
+                if 'teacher_history' not in current_state:
+                    current_state['teacher_history'] = [{'model':copy.deepcopy(self.main_problem.model)}]
                 self.main_problem.teacher_history = current_state['teacher_history']
             for i in range(num_global_iterations):
                 if self.verbose:
                     print('Iteration',i)
                 #print('Iteration',i)
-                new_state = self.main_problem.iterate(num_local_epochs=num_local_epochs,
+                
+                new_state = self.main_problem.iterate(
+                                    num_local_epochs=num_local_epochs,
                                     add_proximity_constraints=True,
                                     send_teacher_model=True,
-                                    state=current_state)
+                                    state=current_state,
+                                    aggregation_weights=aggregation_weights,)
+                
                 current_state.update(new_state['state'])
         
         except EarlyStoppingException:
@@ -128,7 +143,7 @@ class OrchestratorWrapper(TorchNNWrapper):
         return self.main_problem.model,current_state
     
     def evaluate(self,model_params):
-        self._build_main_problem()
+        
         model = copy.deepcopy(self.model)
         model.load_state_dict(model_params)
         metrics = self.main_problem.evaluate(model)
@@ -136,7 +151,7 @@ class OrchestratorWrapper(TorchNNWrapper):
     
     
     def evaluate_constraints(self,model_params):
-        self._build_main_problem()
+        
         model = copy.deepcopy(self.model)
         model.load_state_dict(model_params)
         val_constraints,train_constraints = self.main_problem.compute_violations(model)
@@ -144,7 +159,7 @@ class OrchestratorWrapper(TorchNNWrapper):
                 'val':val_constraints}
     
     def compute_kwargs(self,model_params,use_training=False):
-        self._build_main_problem()
+        
         model = copy.deepcopy(self.model)
         model.load_state_dict(model_params)
         kwargs = self.main_problem.eval_subproblem.instance.compute_val_kwargs(model_params,use_training=use_training)
@@ -156,7 +171,7 @@ class OrchestratorWrapper(TorchNNWrapper):
         return score
     
     def evaluate_constraints2(self,model_params):
-        self._build_main_problem()
+       
         model = copy.deepcopy(self.model)
         model.load_state_dict(model_params)
         
@@ -166,7 +181,7 @@ class OrchestratorWrapper(TorchNNWrapper):
         #train_constraints = main_problem.eval_subproblem.instance.compute_violations(train_kwargs)
         val_objective_fn = self.main_problem.eval_subproblem.instance.original_objective_fn(**val_kwargs)
         #train_objective_fn = main_problem.eval_subproblem.instance.original_objective_fn(**train_kwargs)
-        metrics = self.main_problem.evaluate(model)
+        metrics = self.main_problem.evaluate(model,val_kwargs=val_kwargs)
         #print('Metrics:',metrics)
         #val_constraints,train_constraints = main_problem.compute_violations(model)
         return {#'train_constraints':train_constraints,

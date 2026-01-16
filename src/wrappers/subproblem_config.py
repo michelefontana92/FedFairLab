@@ -20,6 +20,7 @@ class SubProblemConfig:
     num_constraints: int
     compute_only_score: bool
     aggregation_teachers_list: list
+    all_group_ids: dict
 
     def _compute_active_groups(self):
         self.active_groups = {}
@@ -40,7 +41,8 @@ class SubProblemConfig:
         self.current_inequality_constraints = self.inequality_constraints
         self.current_macro_constraints = self.macro_constraints
         self.current_num_constraints = self.num_constraints
-
+        self._init_checkpoints()
+        
     def _init_checkpoints(self):
         self.checkpoints = [
                 EarlyStopping(patience=5, 
@@ -107,5 +109,7 @@ class SubProblemConfig:
         config['compute_only_score'] = self.compute_only_score
         config['id'] = f'Subproblem {self.id}'
         config['teacher_model_list'] = self.aggregation_teachers_list
+        config['subtract_upper_bound'] = self.options.get('subtract_upper_bound', False)
+        config['all_group_ids'] = self.all_group_ids
         self.instance = LocalLearner(model=copy.deepcopy(model),**config)
     

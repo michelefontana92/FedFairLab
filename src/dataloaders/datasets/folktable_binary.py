@@ -1,7 +1,7 @@
 import os
 from .dataset_factory import register_dataset
 from .base_dataset import BaseDataset
-from folktables import ACSDataSource,ACSIncome2
+
 
 @register_dataset('folktables_binary')
 class FolkTablesBinaryDataset(BaseDataset):

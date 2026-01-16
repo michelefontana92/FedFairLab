@@ -61,6 +61,7 @@ class ModelCheckpoint:
         assert metrics is not None, "Metrics are required for ModelCheckpoint"
         assert isinstance(metrics, dict), "Metrics must be a dictionary"
         if self.check(metrics=metrics):
+            
             self.best = metrics[self.monitor]         
             save_fn(os.path.join(self.save_dir, self.save_name))
             return True

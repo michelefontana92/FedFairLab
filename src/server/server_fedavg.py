@@ -84,14 +84,10 @@ class ServerFedAvg(BaseServer):
             final_scores[f'final_{key}'] = v
         self.logger.log(final_scores)
 
-    def _evaluate_global_model(self,best_model=False,eval_local_model=True):
-        if best_model:
-            scores = self._broadcast_fn('evaluate_best_model',
-                            global_model=self.model)
-        else: 
-            scores = self._broadcast_fn('evaluate',
-                            global_model=self.model,
-                            eval_local_model=eval_local_model)    
+    def _evaluate_global_model(self):
+        
+        scores = self._broadcast_fn('evaluate',
+                            model=copy.deepcopy(self.model))
         global_scores = {}
         for score in scores:
             for kind in score.keys():
@@ -115,7 +111,6 @@ class ServerFedAvg(BaseServer):
     
     
     def step(self,**kwargs):
-        
         results = self._broadcast_fn('update',
                            global_model=copy.deepcopy(self.model))
         global_model = copy.deepcopy(self.model)
@@ -123,7 +118,6 @@ class ServerFedAvg(BaseServer):
                         params=results)
         self.model.load_state_dict(new_params)
         global_scores = self._evaluate_global_model()
-        global_scores['global_round'] = kwargs.get('round') + 1
         try:
             for callback in self.callbacks:
                 if isinstance(callback, EarlyStopping):
@@ -133,22 +127,24 @@ class ServerFedAvg(BaseServer):
                         self.logger.log(global_scores)  
                         raise EarlyStoppingException  
                 elif isinstance(callback,ModelCheckpoint):
-                    callback(save_fn=partial(torch.save, self.model.state_dict()),
-                            metrics = global_scores)
+                    callback(save_fn=partial(self.save,
+                                              global_scores),
+                              metrics = global_scores
+                              )
             self.logger.log(global_scores)
         
         except EarlyStoppingException:
             raise EarlyStoppingException 
                 
     def execute(self,**kwargs):
-        global_scores = self._evaluate_global_model(eval_local_model=False)
-        self.logger.log(global_scores)
+        #global_scores = self._evaluate_global_model()
+        #self.logger.log(global_scores)
         try:
             for i in range(self.federated_rounds):
                 self.step(round=i)
         except EarlyStoppingException:
             pass
-        self.fine_tune()
+        #self.fine_tune()
         
     def evaluate(self,**kwargs):
         global_scores = self._evaluate_global_model()
@@ -160,7 +156,33 @@ class ServerFedAvg(BaseServer):
         self._broadcast_fn('fine_tune',global_model=self.model)
         return
     
+    def save(self,metrics,path):
+        result_to_save = {
+            'model_params': self.model.state_dict(),
+            'metrics': metrics
+        }
+        torch.save(result_to_save, path)
+        
+    def log_final_results(self,**kwargs):
+        for callback in self.callbacks:
+          if isinstance(callback, ModelCheckpoint):
+            best_results = callback.get_best_model() 
+            artifact_name = 'global_model'
+            artifact_path = callback.get_model_path()
+            self.logger.log_artifact(artifact_name,
+                                     artifact_path)
+             
+        metrics = best_results['metrics']
+        final_scores = {}
+        for key,v in metrics.items():
+            final_scores[f'final_{key}'] = v
+        self.logger.log(final_scores)
+
     def shutdown(self,**kwargs):
-        self._evaluate_best_model()
+        log_results = kwargs.get('log_results',True)
+        if log_results:
+            self.log_final_results()
+        
         self.logger.close()
-        self._broadcast_fn('shutdown')
+        self._broadcast_fn('shutdown',
+                           log_results=log_results)

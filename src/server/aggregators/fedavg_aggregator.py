@@ -16,20 +16,20 @@ class FedAvgAggregator(BaseAggregator):
     def __call__(self,**kwargs):
         params_list = kwargs.get('params')
         model = kwargs.get('model')
-        assert isinstance(model,nn.Module), "model must be a torch.nn.Module"
+        model_dict = model.state_dict() if isinstance(model, nn.Module) else model
         assert isinstance(params_list,list), "params must be a list"
         for params in params_list:
             assert isinstance(params,dict), "params must be a list of dictionaries"
             assert 'weight' in params.keys(), "params must have a 'weight' key"
             assert 'params' in params.keys(), "params must have a 'params' key"
             assert isinstance(params['params'],dict), "params['params'] must be a dictionary"
-            assert params['params'].keys() == model.state_dict().keys(), "params['params'] must have the same keys as the model's state_dict"
+            assert params['params'].keys() == model_dict.keys(), "params['params'] must have the same keys as the model's state_dict"
         total_weight = self._compute_total_weight(params_list)
         assert total_weight > 0, "total_weight must be greater than 0"
        
         
         new_params = {k: params_list[0]['weight']/total_weight * v for k,v in params_list[0]['params'].items()}
-        assert new_params.keys() == model.state_dict().keys(), "new_params must have the same keys as the model's state_dict"
+        assert new_params.keys() == model_dict.keys(), "new_params must have the same keys as the model's state_dict"
         
         for params in params_list[1:]:
             weight = params['weight']/total_weight

@@ -21,3 +21,5 @@ class MEPHierALMCentralized(CentralizedMEPRun):
         # Pulizia finale dei file di checkpoint, se necessario
         pass
         #shutil.rmtree(f'checkpoints/{self.project_name}')
+    def eval(self):
+        pass

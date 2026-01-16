@@ -203,7 +203,8 @@ class BaseDataset(Dataset):
                     groups_ids_unique = self.group_ids,
                     positive_mask = self.positive_mask[index],
                     groups_ids_list = self.group_ids,
-                    index=index
+                    index=index,
+                    class_weights=self.class_weights,
                     )
        
         if self.use_local_weights:
@@ -220,6 +221,7 @@ class BaseDataset(Dataset):
         return len(self.group_ids[group_name][0])
     
     def get_group_cardinality(self,y,group_id,training_group_name):
+        #print(f'Getting group cardinality for group {group_id} and target {y} in group {training_group_name}')
         return len(torch.where((self.groups_tensor[training_group_name]==group_id) &(self.y==y))[0])
     
     def _compute_local_reweighing(self,df:pd.DataFrame,group_name:str,sensitive_dict:dict):

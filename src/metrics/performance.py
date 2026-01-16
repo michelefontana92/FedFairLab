@@ -9,6 +9,7 @@ class Performance(BaseMetric):
         task = kwargs.get('task','multiclass')
         num_classes = kwargs.get('num_classes',2)
         average = kwargs.get('average','weighted')
+        print(f"Initializing Performance metric with task: {task}, num_classes: {num_classes}, average: {average}")
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.accuracy = Accuracy(task=task,
                                  num_classes=num_classes).to(self.device)
@@ -27,6 +28,8 @@ class Performance(BaseMetric):
         #print('Y_true: ',y_true[:10])
         y_pred = y_pred.to(self.device)
         y_true = y_true.to(self.device)
+        #print(f'Labels: {y_true.unique()}')
+        #print(f'Predictions: {y_pred.unique()}')
         self.accuracy.update(y_pred, y_true)
         self.precision.update(y_pred, y_true)
         self.recall.update(y_pred, y_true)

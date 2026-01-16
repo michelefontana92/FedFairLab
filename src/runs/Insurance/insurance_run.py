@@ -64,3 +64,5 @@ class InsuranceRun(BaseRun):
         pass
     def tearDown(self):
         pass
+    def eval(self):
+        pass

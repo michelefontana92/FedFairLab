@@ -6,4 +6,6 @@ from .mep import MEPDataset
 from .folktable_binary import *
 from .employment import *
 from .insurance import *
+from .income_4 import *
+from .education import *
 __all__ = ['DatasetFactory']

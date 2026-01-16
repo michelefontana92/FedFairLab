@@ -40,9 +40,10 @@ class DataModule(BaseDataLoader):
         self.test_set_name = kwargs.get('test_set')
         
        
-
         self.batch_size = kwargs.get('batch_size', 128)
-        self.num_workers = kwargs.get('num_workers', 0)
+        self.num_workers = kwargs.get('num_workers', 1)
+        self.num_workers = 4
+        self.batch_size = 512
         self.load_test_set = kwargs.get('load_test_set', False)
         self._load_data()
     
@@ -73,25 +74,37 @@ class DataModule(BaseDataLoader):
         return DataLoader(self.datasets.get('train'),
                           batch_size=self.batch_size if batch_size is None else batch_size,
                           num_workers=self.num_workers,
-                          shuffle=True)
+                          shuffle=True,
+                          pin_memory=True,
+                          #persistent_workers=True
+                          )
 
     def val_loader(self,batch_size=None):
        return DataLoader(self.datasets.get('val'),
-                          batch_size=len(self.datasets.get('val')) if batch_size is None else batch_size,
+                          batch_size=len(self.datasets.get('val')),#if batch_size is None else batch_size,
                           num_workers=self.num_workers,
-                          shuffle=False)
+                          shuffle=False,
+                          pin_memory=True,
+                          #persistent_workers=True
+                          )
 
     def test_loader(self,batch_size=None):
         return DataLoader(self.datasets.get('test'),
                           batch_size=len(self.datasets.get('test')) if batch_size is None else batch_size,
                           num_workers=self.num_workers,
-                          shuffle=False)
+                          shuffle=False,
+                          pin_memory=True,
+                          #persistent_workers=True
+                         )
 
     def train_loader_eval(self,batch_size=None):
         return DataLoader(self.datasets.get('train'),
-                          batch_size=len(self.datasets.get('train')) if batch_size is None else batch_size,
+                          batch_size=len(self.datasets.get('train')), #if batch_size is None else batch_size,
                           num_workers=self.num_workers,
-                          shuffle=False)
+                          shuffle=False,
+                          pin_memory=True,
+                          #persistent_workers=True
+                          )
     
     def get_input_dim(self):
         return self.datasets['train'].x.shape[1]

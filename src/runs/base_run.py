@@ -26,12 +26,15 @@ class BaseRun(ABC):
         pass
 
     @abstractmethod
-    def run(self):
+    def run(self,**kwargs):
         pass
-
-    def __call__(self):
+    
+    @abstractmethod
+    def eval(self):
+        pass
+    def __call__(self, **kwargs):
         self.setUp()
-        self.run()
+        self.run(**kwargs)
         self.tearDown()
 
     def build_server_config(self,**kwargs):

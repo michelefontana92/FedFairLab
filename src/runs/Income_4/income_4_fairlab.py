@@ -1,0 +1,41 @@
+import shutil
+from .income_4_run import Income4Run
+from ..run_factory import register_run
+from builder import FedFairLabBuilder
+
+@register_run('income4_fedfairlab')
+class Income4HierALMCentralized(Income4Run):
+    def __init__(self, **kwargs) -> None:
+        super(Income4HierALMCentralized, self).__init__(**kwargs)
+        kwargs['run_dict'] = self.to_dict()
+        self.builder = FedFairLabBuilder(**kwargs)
+    
+    def setUp(self):
+        #print(self.builder.clients)
+        pass
+    
+    def run(self):
+        self.builder.run()
+        
+        """
+        run_ids = ['3u7ijuuz','bgw23ovg','cfwxwtqu','x8jzfpf3','b19oh8t0','cegswopz','93ct7fhl','01t6xqp1','i8z6jdqb']
+        run_ids = ['01t6xqp1']
+        for i,run_id in zip(range(9,10),run_ids):
+            init_fl = i==9
+            print(f'Running client {i} with run_id {run_id}')
+            self.builder.evaluate(f'checkpoints/FedFairLab_Folk_New/fedfairlab_performance_client_{i}_local.h5',
+                              run_id,
+                              client_id=i-1,
+                              init_fl=init_fl,
+                              shutdown=False,
+                              )
+           
+        #self.builder.shutdown()
+        """
+    def tearDown(self) -> None:
+        # Pulizia finale dei file di checkpoint, se necessario
+        pass
+        #shutil.rmtree(f'checkpoints/{self.project_name}')
+
+    def eval(self):
+        pass

@@ -23,8 +23,8 @@ class TorchNNWrapper(BaseWrapper):
         self.data_module:DataModule = kwargs.get('data_module')
         self.logger = kwargs.get('logger')
         self.num_epochs = kwargs.get('num_epochs')
-        self.checkpoints = kwargs.get('checkpoints', [])
-        self.metrics = kwargs.get('metrics', [])
+        self.checkpoints = kwargs.get('checkpoints')
+        self.metrics = kwargs.get('metrics')
         self.verbose = kwargs.get('verbose', False)
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -64,7 +64,6 @@ class TorchNNWrapper(BaseWrapper):
         self.model.train()
         inputs = batch['data'] 
         targets = batch['labels']
-       
         inputs = inputs.float().to(self.device)
         targets = targets.long().to(self.device)
         self.optimizer.zero_grad()
@@ -79,11 +78,14 @@ class TorchNNWrapper(BaseWrapper):
         with torch.no_grad():
             inputs = batch['data']
             targets = batch['labels']
+            class_weights = batch.get('class_weights')
+
             inputs = inputs.float().to(self.device)
             targets = targets.long().to(self.device)
             outputs = self.model(inputs)
+            
             loss = self.loss(outputs, targets)
-            predictions = torch.argmax(torch.softmax(outputs, dim=1), dim=1)
+            predictions = torch.argmax(outputs, dim=1)
            
             return loss.item(), outputs, targets, predictions
     
@@ -181,7 +183,7 @@ class TorchNNWrapper(BaseWrapper):
                     val_targets.append(targets)
                     val_predictions.append(predictions)
                     val_groups.append(batch['groups'])
-                val_loss /= len(val_loader)
+                
                 
                 for batch_idx, batch in enumerate(train_loader_eval):
                     _, outputs, targets,predictions = self._validation_step(batch, batch_idx)

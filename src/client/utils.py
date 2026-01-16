@@ -23,7 +23,7 @@ def average_dictionary_list(dictionary_list):
 
 def scoring_function(results,use_training=False,weight_constraint=10):
     prefix = 'train' if use_training else 'val'
-    score = 1- results[f'{prefix}_objective_fn']
+    score = results[f'{prefix}_objective_fn']
     
     for constraint in results[f'{prefix}_constraints']:
         score -= constraint*weight_constraint

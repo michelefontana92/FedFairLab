@@ -28,6 +28,10 @@ import os
 @click.option('--experiment_name', '-e', default='Dirichlet_09', help='Experiment name')
 @click.option('--algorithm', '-a', default='fedfairlab', help='Algorithm to use')
 @click.option('--num_pers_iterations', '-np', default=10, help='Number of personalization epochs')
+@click.option('--num_classes', default=2, help='Number of classes (for classification tasks)')
+@click.option('--evaluate','-ev',flag_value=True, default=False, help='Evaluation mode')
+@click.option('--checkpoint_path', '-cp', default='', help='Path to the model checkpoint')
+@click.option('--prefix', '-pf', default='fedfairlab', help='Prefix for evaluation run')
 def main(run, project_name, start_index, id,
          metrics_list, groups_list, threshold_list,
          num_subproblems, num_global_iterations, 
@@ -37,7 +41,9 @@ def main(run, project_name, start_index, id,
          num_clients,gpu_devices,
          num_federated_iterations,
          experiment_name,
-         algorithm,num_pers_iterations):
+         algorithm,num_pers_iterations,
+         num_classes, evaluate,
+         checkpoint_path, prefix):
 
     if gpu_devices:
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_devices)
@@ -66,6 +72,10 @@ def main(run, project_name, start_index, id,
                                 experiment_name=experiment_name,
                                 algorithm=algorithm,
                                 num_personalization_iterations=num_pers_iterations,
+                                num_classes=num_classes,
+                                eval_mode=evaluate,
+                                checkpoint_path=checkpoint_path,
+                                eval_prefix=prefix
                                 )
     run()
 

@@ -119,13 +119,15 @@ class TorchNNMOWrapper(TorchNNWrapper):
         group_ids = {group_name:group_ids[group_name].to(self.device) for group_name in group_ids.keys()}
         group_ids_list = {group_name:group_ids_list[group_name].to(self.device) for group_name in group_ids_list.keys()}
         labels = batch['labels'].to(self.device)
+        class_weights =batch['class_weights'].to(self.device)
         kwargs = {
             'group_ids':group_ids,
             'positive_mask':positive_mask,
             'group_ids_list':group_ids_list,
             'logits':outputs,
             'group_masks':group_ids,
-            'labels':labels
+            'labels':labels,
+            'class_weights':class_weights,
         }
         return kwargs
     
