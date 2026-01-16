@@ -1,8 +1,0 @@
-message: {'model_checkpoint': 1,
-          'val_accuracy': tensor(0.3180),
-          'val_constraints_score': -4.807868778705597,
-          'val_demographic_parity_Race': tensor(0.0019),
-          'val_f1': tensor(0.1538),
-          'val_loss': tensor(2.2153),
-          'val_precision': tensor(0.2476),
-          'val_recall': tensor(0.3180)}
