@@ -1,3 +1,5 @@
+# FedFairLAB
+
 FedFairLAB is a method for fairness-aware federated learning under
 performance budgets. It implements a federated version of the FairLAB
 constrained-optimization workflow (see the
