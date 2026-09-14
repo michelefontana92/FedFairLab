@@ -1,14 +1,32 @@
 # FedFairLAB
 
-FedFairLAB is a research codebase for fairness-aware federated learning under
+FedFairLAB is a method for fairness-aware federated learning under
 performance budgets. It implements a federated version of the FairLAB
-constrained-optimization workflow and uses ensemble-logit distillation to build
-the global model from locally updated client models.
+constrained-optimization workflow (see this [paper](link.springer.com/chapter/10.1007/978-3-032-05962-8_13) for a detailed description of FairLAB) and uses ensemble-logit distillation to build
+the global model from locally updated client models. Full details about FedFairLAB can be found in the paper 
+[Federated learning with multiple, intersectional and multiclass fairness guarantees under performance budgets](https://link.springer.com/article/10.1007/s10618-026-01243-6).
 
 The code is designed for experimental evaluation on horizontally partitioned
 tabular datasets, with support for binary and multiclass classification,
 multiple sensitive groups, intersectional fairness constraints, and non-IID
 client splits.
+
+## Citation
+
+If you use FedFairLAB in your research, please cite the following paper:
+
+```bibtex
+@article{DBLP:journals/datamine/FontanaNM26,
+  author  = {Michele Fontana and Francesca Naretto and Anna Monreale},
+  title   = {Federated learning with multiple, intersectional and multiclass fairness guarantees under performance budgets},
+  journal = {Data Min. Knowl. Discov.},
+  volume  = {40},
+  number  = {5},
+  pages   = {81},
+  year    = {2026},
+  doi     = {10.1007/S10618-026-01243-6}
+}
+```
 
 ## Method Summary
 
@@ -21,7 +39,9 @@ At each federated round, FedFairLAB follows the main phases below.
 4. The server evaluates the updated models and converts their global scores into
    ensemble weights.
 5. Each selected client computes the weighted ensemble logits on its local data.
-6. These logits are used as local targets for federated distillation.
+6. These logits are used as local targets for federated distillation. The loss
+   combines a sample/class mean KL with a classwise mean-max KL over the
+   observed sensitive groups.
 7. Client distillation updates are combined with FedAvg to produce the next
    global model.
 8. The new global model is evaluated and inserted into the server history.
@@ -1036,7 +1056,7 @@ The current implementation includes:
 - global teacher sampling from server history;
 - local FairLAB updates with selective distillation;
 - ensemble-logit aggregation from locally updated models;
-- federated distillation using `z_ens`;
+- federated distillation using `z_ens` with classwise group-robust KL;
 - FedAvg over distilled client models;
 - FairLAB-style local and global performance budgets;
 - support for no-fairness-constraint runs.
