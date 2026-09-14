@@ -1,32 +1,17 @@
-# FedFairLAB
-
 FedFairLAB is a method for fairness-aware federated learning under
 performance budgets. It implements a federated version of the FairLAB
-constrained-optimization workflow (see this [paper](link.springer.com/chapter/10.1007/978-3-032-05962-8_13) for a detailed description of FairLAB) and uses ensemble-logit distillation to build
-the global model from locally updated client models. Full details about FedFairLAB can be found in the paper 
+constrained-optimization workflow (see the
+[FairLAB paper](https://link.springer.com/chapter/10.1007/978-3-032-05962-8_13)
+for a detailed description) and uses ensemble-logit distillation to build the
+global model from locally updated client models.
+
+Full details about FedFairLAB can be found in the paper
 [Federated learning with multiple, intersectional and multiclass fairness guarantees under performance budgets](https://link.springer.com/article/10.1007/s10618-026-01243-6).
 
 The code is designed for experimental evaluation on horizontally partitioned
 tabular datasets, with support for binary and multiclass classification,
 multiple sensitive groups, intersectional fairness constraints, and non-IID
 client splits.
-
-## Citation
-
-If you use FedFairLAB in your research, please cite the following paper:
-
-```bibtex
-@article{DBLP:journals/datamine/FontanaNM26,
-  author  = {Michele Fontana and Francesca Naretto and Anna Monreale},
-  title   = {Federated learning with multiple, intersectional and multiclass fairness guarantees under performance budgets},
-  journal = {Data Min. Knowl. Discov.},
-  volume  = {40},
-  number  = {5},
-  pages   = {81},
-  year    = {2026},
-  doi     = {10.1007/S10618-026-01243-6}
-}
-```
 
 ## Method Summary
 
