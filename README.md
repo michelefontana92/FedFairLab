@@ -1043,3 +1043,19 @@ The current implementation includes:
 
 The codebase is documented with docstrings throughout `src/` and is intended to
 be readable enough for extension and experimentation.
+
+## Citation
+
+If you use FedFairLAB in your research, please cite the following paper:
+
+```bibtex
+@article{DBLP:journals/datamine/FontanaNM26,
+  author  = {Michele Fontana and Francesca Naretto and Anna Monreale},
+  title   = {Federated learning with multiple, intersectional and multiclass fairness guarantees under performance budgets},
+  journal = {Data Min. Knowl. Discov.},
+  volume  = {40},
+  number  = {5},
+  pages   = {81},
+  year    = {2026},
+  doi     = {10.1007/S10618-026-01243-6}
+}
