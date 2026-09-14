@@ -4,16 +4,37 @@ import torch.nn as nn
 
 @register_aggregator("FedAvgAggregator")
 class FedAvgAggregator(BaseAggregator):
+    """Implementation of FedAvgAggregator."""
     def __init__(self,**kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super(FedAvgAggregator,self).__init__(**kwargs)
     
     def setup(self,**kwargs):
+        """Prepare.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         pass
     
     def _compute_total_weight(self,params_list):
+        """Handle compute total weight.
+        
+        Args:
+            params_list: Client parameter payloads to aggregate.
+        """
         return sum([params['weight'] for params in params_list])
         
     def __call__(self,**kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         params_list = kwargs.get('params')
         model = kwargs.get('model')
         model_dict = model.state_dict() if isinstance(model, nn.Module) else model

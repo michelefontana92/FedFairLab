@@ -1,14 +1,31 @@
+from debug_utils import debug_print
 from torch.utils.data import Dataset
 import os
 import pandas as pd
 import torch
+import numpy as np
 from .utils import assign_group_id
 from sklearn.utils.class_weight import compute_class_weight
 import copy 
 from .data_encoding import fit_scalers, encode_dataset
 import pickle as pkl
+import warnings
+from sklearn.exceptions import InconsistentVersionWarning
 
 pd.set_option('future.no_silent_downcasting', True)
+
+
+def _writable_array(array):
+    """
+    Return a contiguous writable NumPy array for safe tensor conversion.
+
+    Pandas and some NumPy views can expose read-only buffers. ``torch.from_numpy``
+    shares memory with the input array, so converting those views directly emits
+    a warning and can lead to undefined behavior if the tensor is later written.
+    """
+    return np.ascontiguousarray(array).copy()
+
+
 class BaseDataset(Dataset):
     """
     BaseDataset is a custom dataset class that extends the PyTorch Dataset class. It is designed to handle datasets with 
@@ -54,12 +71,19 @@ class BaseDataset(Dataset):
         merge(dataset): Merges the current dataset with another dataset.
     """
     def __init__(self, **kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super(BaseDataset, self).__init__()
         self.root = kwargs.get('root', 'data')
         self.data_name = kwargs.get('data_name', 'data')
         self.data_path = os.path.join(self.root, self.data_name)
         self.target = kwargs.get('target', 'target')
         self.cat_cols = kwargs.get('cat_cols', [])
+        self.categorical_categories = kwargs.get(
+            'categorical_categories', {})
         self.num_cols = kwargs.get('num_cols', [])
         self.sensitive_attributes = kwargs.get('sensitive_attributes', [])
         self.scaler_name = kwargs.get('scaler_name', 'scaler.p')
@@ -67,40 +91,86 @@ class BaseDataset(Dataset):
         self.clean_data_path = ''
         self.use_class_weights = kwargs.get('use_class_weights',True)
         self.use_local_weights = kwargs.get('use_local_weights',False)
+        self.scaler_fit_indices = kwargs.get('scaler_fit_indices')
        
     def setup(self):
+        """Prepare."""
         self.id_to_combination_dict = {}
         x, y, groups,group_ids,local_weights = self._load_dataset()
-        self.x = torch.from_numpy(x).float()
-        self.y = torch.from_numpy(y).long()
+        self.x = torch.from_numpy(_writable_array(x)).float()
+        self.y = torch.from_numpy(_writable_array(y)).long()
         self.positive_mask = self.y == 1
         self.groups = groups
         self.groups_tensor = {}
         self.local_weights = {}
         for group_name,group in groups.items():
-            self.groups_tensor[group_name] = torch.from_numpy(group).long()
+            self.groups_tensor[group_name] = torch.from_numpy(
+                _writable_array(group)
+            ).long()
         self.group_ids = group_ids
         if self.use_local_weights:
             for group_name,_ in self.sensitive_attributes:
-                self.local_weights[group_name] = torch.from_numpy(local_weights[group_name]).float()
+                self.local_weights[group_name] = torch.from_numpy(
+                    _writable_array(local_weights[group_name])
+                ).float()
         self.data = None
         self.num_features = self.x.shape[1]
         #print('Num groups:',self.get_num_groups('GenderRace'))
         #print('Group ids:',self.get_group_ids())
     def data_preprocessing(self,data:pd.DataFrame):
+        """Handle data preprocessing.
+        
+        Args:
+            data: Input data or dataframe.
+        """
         return data
     
     def _fit_scaler(self):
+        """Handle fit scaler."""
         data_orig = pd.read_csv(self.clean_data_path)
-        self.scaler = fit_scalers(data_orig, self.cat_cols, self.num_cols, [])
+        if self.scaler_fit_indices is not None:
+            data_orig = data_orig.iloc[self.scaler_fit_indices]
+        self.scaler = fit_scalers(
+            data_orig,
+            self.cat_cols,
+            self.num_cols,
+            [],
+            categorical_categories=self.categorical_categories,
+        )
         pkl.dump(self.scaler, open(self.scaler_path, 'wb'))
+
+    def _load_scaler(self):
+        """
+        Load preprocessing scalers, refitting them when sklearn versions differ.
+
+        Old scaler pickles may have been serialized with a different
+        scikit-learn version. Treat that warning as a signal to rebuild the
+        scaler from ``clean_data_path`` using the current environment.
+        """
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", InconsistentVersionWarning)
+                with open(self.scaler_path, 'rb') as scaler_file:
+                    return pkl.load(scaler_file)
+        except (InconsistentVersionWarning, FileNotFoundError):
+            debug_print(
+                f"Refitting scaler at {self.scaler_path} "
+                "because it is missing or was created with another sklearn version."
+            )
+            self._fit_scaler()
+            return self.scaler
 
     def _preprocess(self,data):
 
-        self.scaler = pkl.load(open(self.scaler_path, 'rb'))
+        """Handle preprocess.
+        
+        Args:
+            data: Input data or dataframe.
+        """
+        self.scaler = self._load_scaler()
         data_cpy = data.copy()
         if self.use_local_weights:
-            print('Computing local weights')
+            debug_print('Computing local weights')
             for group_name,sensitive_dict in self.sensitive_attributes:
                 data_cpy = self._compute_local_reweighing(data_cpy,
                                                         group_name,
@@ -110,17 +180,22 @@ class BaseDataset(Dataset):
             data_cpy[self.target] = data_cpy[self.target].replace(label, idx).infer_objects()
         
         data_cpy = self.data_preprocessing(data_cpy)
-        print('Assigning group ids')
+        debug_print('Assigning group ids')
         #for group_name,sensitive_dict in self.sensitive_attributes:
         data_cpy,id_to_combination_dict = assign_group_id(data_cpy, self.sensitive_attributes)
         self.id_to_combination_dict = id_to_combination_dict
-        print('Encoding dataset')    
+        debug_print('Encoding dataset')    
         return encode_dataset(data_cpy, self.cat_cols,
                               self.num_cols, [], 
                               self.scaler)
     
 
     def _load_dataset(self,load_data=True):
+        """Handle load dataset.
+        
+        Args:
+            load_data: Input data or dataframe.
+        """
         if load_data:
             if not os.path.exists(self.data_path):
                 raise FileNotFoundError(f'File {self.data_path} not found')
@@ -130,20 +205,20 @@ class BaseDataset(Dataset):
             data = self.data
 
 
-        print('Computing class weights')
+        debug_print('Computing class weights')
         self.class_weights = self._compute_class_weight(data) if self.use_class_weights else None
         #print('Class weights: ',self.class_weights)
 
         
         try:
-            print('Preprocessing data')
+            debug_print('Preprocessing data')
             data = self._preprocess(data)
         except: 
-            print('Fitting scaler')
+            debug_print('Fitting scaler')
             self._fit_scaler()
-            print('Preprocessing data')
+            debug_print('Preprocessing data')
             data = self._preprocess(data)
-        print('Data preprocessed')
+        debug_print('Data preprocessed')
         assert data is not None, 'Data not preprocessed'
         data1 = data.copy()
         drop_cols = [self.target]
@@ -168,14 +243,24 @@ class BaseDataset(Dataset):
         
         #groups_ids_list = {group_name:torch.unique(torch.tensor([i for i in range(len(group_ids[group_name]))]).view(1,-1)) for group_name,_ in self.sensitive_attributes }
         for (name,_) in self.sensitive_attributes:
-            print(f"Group ids of {name}:\n {group_ids[name]}")
+            debug_print(f"Group ids of {name}:\n {group_ids[name]}")
        
         return X, y, s,group_ids,weights
     
     def get_group_ids(self):
+        """Return group ids.
+        
+        Returns:
+            Requested result.
+        """
         return self.group_ids
     
     def _compute_class_weight(self,data:pd.DataFrame):
+        """Handle compute class weight.
+        
+        Args:
+            data: Input data or dataframe.
+        """
         return torch.tensor(compute_class_weight('balanced',
                                                 classes=data[self.target].unique(),
                                                  y=data[self.target]),
@@ -186,6 +271,11 @@ class BaseDataset(Dataset):
         return len(self.x)
 
     def __getitem__(self, index):
+        """Handle getitem.
+        
+        Args:
+            index: Input row or value to inspect.
+        """
         groups = {group_name:self.groups[group_name][index] for group_name,_ in self.sensitive_attributes }
         
         if self.use_local_weights:
@@ -212,19 +302,54 @@ class BaseDataset(Dataset):
         return result
     
     def get_class_weights(self):
+        """Return class weights.
+        
+        Returns:
+            Requested result.
+        """
         return self.class_weights
     
     def get_group_ids(self):
+        """Return group ids.
+        
+        Returns:
+            Requested result.
+        """
         return self.group_ids
     
     def get_num_groups(self,group_name):
+        """Return num groups.
+        
+        Args:
+            group_name: Name of the sensitive/group attribute.
+        
+        Returns:
+            Requested result.
+        """
         return len(self.group_ids[group_name][0])
     
     def get_group_cardinality(self,y,group_id,training_group_name):
         #print(f'Getting group cardinality for group {group_id} and target {y} in group {training_group_name}')
+        """Return group cardinality.
+        
+        Args:
+            y: Label tensor or array.
+            group_id: Group identifier used for filtering or statistics.
+            training_group_name: Name of the sensitive/group attribute.
+        
+        Returns:
+            Requested result.
+        """
         return len(torch.where((self.groups_tensor[training_group_name]==group_id) &(self.y==y))[0])
     
     def _compute_local_reweighing(self,df:pd.DataFrame,group_name:str,sensitive_dict:dict):
+        """Handle compute local reweighing.
+        
+        Args:
+            df: Input dataframe.
+            group_name: Name of the sensitive/group attribute.
+            sensitive_dict: Sensitive-attribute metadata dictionary.
+        """
         data = df.copy()
         idx = f'group_id_{group_name}'
         attributes = copy.deepcopy(sensitive_dict)
@@ -250,6 +375,11 @@ class BaseDataset(Dataset):
         return data
 
     def merge(self,dataset):
+        """Merge.
+        
+        Args:
+            dataset: Registered dataset identifier.
+        """
         if self.data is None:
             data_src = pd.read_csv(self.data_path)
         else: 
@@ -258,8 +388,20 @@ class BaseDataset(Dataset):
         self.data = pd.concat([data_src,data_dest]).sample(frac=1).reset_index(drop=True)
         assert len(data_src.columns) == len(data_dest.columns)== len(self.data.columns), 'Columns mismatch'
         assert len(self.data) == len(data_src) + len(data_dest), 'Data mismatch'
-        x, y, groups,local_weights = self._load_dataset(load_data=False)
-        self.x = torch.from_numpy(x).float()
-        self.y = torch.from_numpy(y).long()
+        x, y, groups, group_ids, local_weights = self._load_dataset(load_data=False)
+        self.x = torch.from_numpy(_writable_array(x)).float()
+        self.y = torch.from_numpy(_writable_array(y)).long()
+        self.positive_mask = self.y == 1
         self.groups = groups
-        self.local_weights = torch.from_numpy(local_weights).float()
+        self.groups_tensor = {
+            group_name: torch.from_numpy(_writable_array(group)).long()
+            for group_name, group in groups.items()
+        }
+        self.group_ids = group_ids
+        self.local_weights = {}
+        if self.use_local_weights:
+            for group_name, _ in self.sensitive_attributes:
+                self.local_weights[group_name] = torch.from_numpy(
+                    _writable_array(local_weights[group_name])
+                ).float()
+        self.num_features = self.x.shape[1]

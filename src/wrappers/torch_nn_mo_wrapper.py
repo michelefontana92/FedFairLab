@@ -2,10 +2,11 @@ from .torch_nn_wrapper import TorchNNWrapper
 import torch
 import tqdm
 from callbacks import EarlyStopping, ModelCheckpoint
-from requirements import RequirementSet
 import os 
+from typing import Any
 
 class EarlyStoppingException(Exception):
+    """Implementation of EarlyStoppingException."""
     pass
 
 class TorchNNMOWrapper(TorchNNWrapper):
@@ -15,11 +16,11 @@ class TorchNNMOWrapper(TorchNNWrapper):
         *args: Variable length argument list.
         **kwargs: Arbitrary keyword arguments.
             - training_group_name (str): The name of the training group.
-            - requirement_set (RequirementSet): The set of requirements for evaluation.
+            - requirement_set: The set of requirements for evaluation.
             - surrogate_functions (list[(callable, float)]): List of surrogate functions for evaluation.
     Attributes:
         training_group_name (str): The name of the training group.
-        requirement_set (RequirementSet): The set of requirements for evaluation.
+        requirement_set: The set of requirements for evaluation.
         surrogate_functions (list[(callable, float)]): List of surrogate functions for evaluation.
     Methods:
         _training_step(batch, batch_idx):
@@ -38,9 +39,15 @@ class TorchNNMOWrapper(TorchNNWrapper):
             Scores the model on the given data loader using specified metrics.
     """
     def __init__(self,*args, **kwargs):
+        """Initialize the object.
+        
+        Args:
+            *args: Positional arguments forwarded to the implementation.
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super(TorchNNMOWrapper,self).__init__(*args, **kwargs)
         self.training_group_name:str = kwargs.get('training_group_name')
-        self.requirement_set:RequirementSet = kwargs.get('requirement_set')
+        self.requirement_set: Any = kwargs.get('requirement_set')
         self.surrogate_functions:list[(callable,float)] = kwargs.get('surrogate_functions')
         
         assert self.requirement_set is not None, f'{self.requirement_set} has to be provided'
@@ -48,6 +55,12 @@ class TorchNNMOWrapper(TorchNNWrapper):
         assert self.training_group_name is not None, f'{self.training_group_name} has to be provided'
     
     def _training_step(self,batch,batch_idx):
+        """Handle training step.
+        
+        Args:
+            batch: Mini-batch dictionary from a data loader.
+            batch_idx: Index of the mini-batch within the epoch.
+        """
         self.model.train()
         inputs = batch['data'] 
         targets = batch['labels']
@@ -80,6 +93,12 @@ class TorchNNMOWrapper(TorchNNWrapper):
         return loss.item()
     
     def _validation_step(self,batch,batch_idx):
+        """Handle validation step.
+        
+        Args:
+            batch: Mini-batch dictionary from a data loader.
+            batch_idx: Index of the mini-batch within the epoch.
+        """
         self.model.eval()
         with torch.no_grad():
             inputs = batch['data'] 
@@ -113,6 +132,12 @@ class TorchNNMOWrapper(TorchNNWrapper):
             return loss.item(), outputs, targets, predictions
     
     def _compute_kwargs(self,batch,outputs):
+        """Handle compute kwargs.
+        
+        Args:
+            batch: Mini-batch dictionary from a data loader.
+            outputs: Model outputs for the current batch.
+        """
         group_ids = batch['groups']
         group_ids_list = batch['groups_ids_list']
         positive_mask=batch['positive_mask'].to(self.device)
@@ -132,6 +157,11 @@ class TorchNNMOWrapper(TorchNNWrapper):
         return kwargs
     
     def _evaluate_requirements(self,data_loader):
+        """Handle evaluate requirements.
+        
+        Args:
+            data_loader: Data loader used for inference or evaluation.
+        """
         with torch.no_grad():
             outputs = []
             targets = []
@@ -155,6 +185,11 @@ class TorchNNMOWrapper(TorchNNWrapper):
         return requirements,loss,outputs,targets,predictions,groups_dict
     
     def _update_metrics(self,**kwargs):
+        """Handle update metrics.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.model.eval()
 
         val_loader = self.data_module.val_loader()
@@ -188,6 +223,14 @@ class TorchNNMOWrapper(TorchNNWrapper):
     
     def fit(self,**kwargs):
         
+        """Train.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        
+        Returns:
+            Requested result.
+        """
         num_epochs = kwargs.get('num_epochs',-1)
         disable_log = kwargs.get('disable_log',False)
         evaluate_best_model = kwargs.get('evaluate_best_model',True)
@@ -239,6 +282,16 @@ class TorchNNMOWrapper(TorchNNWrapper):
         return self.model
 
     def score(self, data_loader,metrics,prefix=''):
+        """Compute a score.
+        
+        Args:
+            data_loader: Data loader used for inference or evaluation.
+            metrics: Metric objects or metric dictionary.
+            prefix: Metric-name prefix identifying the data split.
+        
+        Returns:
+            Requested result.
+        """
         assert len(data_loader) == 1, "Data loader should have a single batch"
         assert isinstance(metrics, list), "Metrics should be a list"
         self.model.to(self.device)

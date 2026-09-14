@@ -1,3 +1,4 @@
+from debug_utils import debug_print
 from torchmetrics import StatScores
 import torch 
 from .metrics_factory import register_metric
@@ -6,7 +7,13 @@ from surrogates import SurrogateFactory
 
 @register_metric('statistic_scores')
 class StatisticScores(BaseMetric):
+    """Implementation of StatisticScores."""
     def __init__(self,**kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         task = kwargs.get('task','multiclass')
         num_classes = kwargs.get('num_classes',2)
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -14,11 +21,22 @@ class StatisticScores(BaseMetric):
                                       num_classes=num_classes).to(self.device)
     
     def calculate(self, y_pred, y_true):
+        """Calculate the metric value.
+        
+        Args:
+            y_pred: Predicted labels or model outputs.
+            y_true: Ground-truth labels.
+        """
         y_pred = y_pred.to(self.device)
         y_true = y_true.to(self.device)
         self.stat_scores.update(y_pred, y_true)
     
     def get(self,normalize=False):
+        """Return the current metric value.
+        
+        Args:
+            normalize: Whether to return normalized metric values.
+        """
         support = self.stat_scores.tp + self.stat_scores.fp + self.stat_scores.tn + self.stat_scores.fn
         stats = {"tp": self.stat_scores.tp, 
             "fp": self.stat_scores.fp,
@@ -39,13 +57,20 @@ class StatisticScores(BaseMetric):
         return stats    
        
     def reset(self):
+        """Reset."""
         self.stat_scores.reset()
 
 
 
 
 class GroupFairnessMetric(BaseMetric):
+    """Implementation of GroupFairnessMetric."""
     def __init__(self,**kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         task = kwargs.get('task','binary')
         self.num_classes = kwargs.get('num_classes',2)
         group_ids = kwargs.get('group_ids')
@@ -76,6 +101,13 @@ class GroupFairnessMetric(BaseMetric):
 
     def calculate(self, y_pred, y_true, group_ids:dict):
         #print('Group ids: ',group_ids.keys())
+        """Calculate the metric value.
+        
+        Args:
+            y_pred: Predicted labels or model outputs.
+            y_true: Ground-truth labels.
+            group_ids: Identifiers of the groups involved in the computation.
+        """
         current_group_ids:list = group_ids[self.group_name]
         #print('Current group ids: ',current_group_ids)
         y_pred = y_pred.to(self.device)
@@ -105,12 +137,26 @@ class GroupFairnessMetric(BaseMetric):
                             self.stats_per_class[current_class][group_id.item()].calculate(y_pred_group, y_true_group)
 
     def get(self,normalize=False):
+       """Return the current metric value.
+       
+       Args:
+           normalize: Whether to return normalized metric values.
+       """
        pass
 
     def get_stats_per_group(self,group_id):     
+        """Return stats per group.
+        
+        Args:
+            group_id: Group identifier used for filtering or statistics.
+        
+        Returns:
+            Requested result.
+        """
         pass
              
     def reset(self):
+        """Reset."""
         for _,stats in self.stats_per_group.items():
             stats.reset()
         for _,stats_dict in self.stats_per_class.items():
@@ -120,7 +166,13 @@ class GroupFairnessMetric(BaseMetric):
 
 @register_metric('demographic_parity')
 class DemographicParity(GroupFairnessMetric):
+    """Implementation of DemographicParity."""
     def __init__(self, **kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super().__init__(**kwargs)
         self.stats_per_group_diff = []
         self.stats_per_class_group_diff = {}
@@ -130,6 +182,7 @@ class DemographicParity(GroupFairnessMetric):
 
             
     def get(self):
+        """Return the current value."""
         if self.num_classes == 2:
            
             #print('Number of groups with valid stats:', len(group_ids))
@@ -146,7 +199,7 @@ class DemographicParity(GroupFairnessMetric):
                        self.stats_per_group_diff.append(
                            abs(stats_group_i['base_rate'] - stats_group_j['base_rate']))
                     else:
-                        print(f'Skipping group {i} and {j} due to empty stats')
+                        debug_print(f'Skipping group {i} and {j} due to empty stats')
             return {
                     f'demographic_parity_{self.group_name}':self._reduction(
                         torch.tensor(self.stats_per_group_diff))
@@ -182,14 +235,24 @@ class DemographicParity(GroupFairnessMetric):
                     dp = self._reduction(torch.tensor(self.stats_per_class_group_diff[current_class]))
                     self.metrics_per_class.append(dp)
            
+            per_class = torch.tensor(self.metrics_per_class)
             return {
-                    f'demographic_parity_{self.group_name}':self._reduction(
-                        torch.tensor(self.metrics_per_class))
-                    }
+                f'demographic_parity_{self.group_name}': self._reduction(
+                    per_class)
+            }
     def get_stats_per_group(self, group_id):
+        """Return stats per group.
+        
+        Args:
+            group_id: Group identifier used for filtering or statistics.
+        
+        Returns:
+            Requested result.
+        """
         return self.stats_per_group[group_id].get()['base_rate'][0].item()
             
     def reset(self):
+        """Reset."""
         super().reset()
         self.stats_per_group_diff = []
         self.metrics_per_class = []
@@ -198,7 +261,13 @@ class DemographicParity(GroupFairnessMetric):
     
 @register_metric('equal_opportunity')
 class EqualOpportunity(GroupFairnessMetric):
+    """Implementation of EqualOpportunity."""
     def __init__(self, **kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super().__init__(**kwargs)
         self.stats_per_group_diff = []
         self.stats_per_class_group_diff = {}
@@ -207,6 +276,7 @@ class EqualOpportunity(GroupFairnessMetric):
             self.stats_per_class_group_diff[current_class] = []
 
     def get(self):
+        """Return the current value."""
         if self.num_classes == 2:
             for i in range(len(self.stats_per_group)-1):
                 for j in range(i+1,len(self.stats_per_group)):
@@ -244,10 +314,19 @@ class EqualOpportunity(GroupFairnessMetric):
                     }
         
     def get_stats_per_group(self, group_id):
+        """Return stats per group.
+        
+        Args:
+            group_id: Group identifier used for filtering or statistics.
+        
+        Returns:
+            Requested result.
+        """
         return torch.tensor(
             self.stats_per_group[group_id].get()['tpr'][0].item()
             )
     def reset(self):
+        """Reset."""
         super().reset()
         self.stats_per_group_diff = []
         self.metrics_per_class = []
@@ -258,7 +337,13 @@ class EqualOpportunity(GroupFairnessMetric):
     
 @register_metric('equalized_odds')
 class EqualizedOdds(GroupFairnessMetric):
+    """Implementation of EqualizedOdds."""
     def __init__(self, **kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super().__init__(**kwargs)
         self.stats_per_group_diff_tpr = []
         self.stats_per_group_diff_fpr = []
@@ -270,6 +355,7 @@ class EqualizedOdds(GroupFairnessMetric):
             self.stats_per_class_group_diff_fpr[current_class] = []
        
     def get(self):
+        """Return the current value."""
         if self.num_classes == 2: 
             for i in range(len(self.stats_per_group.keys())-1):
                 for j in range(i+1,len(self.stats_per_group.keys())):
@@ -359,6 +445,7 @@ class EqualizedOdds(GroupFairnessMetric):
                         torch.tensor(self.metrics_per_class))
                     }
     def reset(self):
+        """Reset."""
         super().reset()
         self.stats_per_group_diff_tpr = []
         self.metrics_per_class = []

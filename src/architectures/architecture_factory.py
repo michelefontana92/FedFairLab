@@ -20,6 +20,11 @@ def register_architecture(architecture):
             ...
     """
     def decorator(cls):
+        """Register the decorated class or function and return it unchanged.
+        
+        Args:
+            cls: Class being registered.
+        """
         if architecture in _ARCHITECTURES:
             raise ValueError(f"Cannot register duplicate architecture ({architecture})")
         if not issubclass(cls, torch.nn.Module):
@@ -29,8 +34,18 @@ def register_architecture(architecture):
     return decorator
 
 class ArchitectureFactory:
+    """Factory for constructing registered neural network architectures."""
     @staticmethod
     def create_architecture(architecture, **kwargs):
+        """Create architecture.
+        
+        Args:
+            architecture: Registered architecture identifier.
+            **kwargs: Additional options forwarded to the implementation.
+        
+        Returns:
+            Requested result.
+        """
         if architecture not in _ARCHITECTURES:
             raise ValueError(f"Unknown architecture type: {architecture}")
         return _ARCHITECTURES[architecture](**kwargs)

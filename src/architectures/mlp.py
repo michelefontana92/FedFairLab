@@ -6,7 +6,13 @@ from .architecture_factory import register_architecture
 @register_architecture('mlp2hidden')
 class MLP2Hidden(nn.Module):
 
+    """Implementation of MLP2Hidden."""
     def __init__(self, **kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super(MLP2Hidden, self).__init__()
         model_params = kwargs['model_params']
         input_dim = model_params['input']
@@ -21,6 +27,11 @@ class MLP2Hidden(nn.Module):
         self.out = nn.Linear(hidden2_dim, output_dim)
 
     def forward(self, batch):
+        """Run the forward pass.
+        
+        Args:
+            batch: Mini-batch dictionary from a data loader.
+        """
         x = F.relu(self.fc1(batch))
         x = F.relu(self.fc2(x))
         x = self.drop(x)
@@ -28,20 +39,29 @@ class MLP2Hidden(nn.Module):
         return x
 
     def freeze(self):
+        """Freeze model parameters."""
         self.fc1.requires_grad_(False)
 
     def freeze_all(self):
+        """Freeze all model parameters."""
         self.fc1.requires_grad_(False)
         self.out.requires_grad_(False)
 
     def unfreeze_all(self):
+        """Unfreeze all model parameters."""
         self.fc1.requires_grad_(True)
         self.out.requires_grad_(True)
 
 @register_architecture('mlp3hidden')
 class MLP3Hidden(nn.Module):
 
+    """Implementation of MLP3Hidden."""
     def __init__(self, **kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super(MLP3Hidden, self).__init__()
         model_params = kwargs['model_params']
         input_dim = model_params['input']
@@ -58,6 +78,11 @@ class MLP3Hidden(nn.Module):
         self.out = nn.Linear(hidden3_dim, output_dim)
 
     def forward(self, batch):
+        """Run the forward pass.
+        
+        Args:
+            batch: Mini-batch dictionary from a data loader.
+        """
         x = F.relu(self.fc1(batch))
         x = F.relu(self.fc2(x))
         x = F.relu(self.fc3(x))
@@ -66,13 +91,16 @@ class MLP3Hidden(nn.Module):
         return x
 
     def freeze(self):
+        """Freeze model parameters."""
         self.fc1.requires_grad_(False)
 
     def freeze_all(self):
+        """Freeze all model parameters."""
         self.fc1.requires_grad_(False)
         self.out.requires_grad_(False)
 
     def unfreeze_all(self):
+        """Unfreeze all model parameters."""
         self.fc1.requires_grad_(True)
         self.out.requires_grad_(True)
 
@@ -80,7 +108,13 @@ class MLP3Hidden(nn.Module):
 @register_architecture('mlp4hidden')
 class MLP4Hidden(nn.Module):
 
+    """Implementation of MLP4Hidden."""
     def __init__(self, **kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super(MLP4Hidden, self).__init__()
         model_params = kwargs['model_params']
         input_dim = model_params['input']
@@ -99,6 +133,11 @@ class MLP4Hidden(nn.Module):
         self.out = nn.Linear(hidden4_dim, output_dim)
 
     def forward(self, batch):
+        """Run the forward pass.
+        
+        Args:
+            batch: Mini-batch dictionary from a data loader.
+        """
         x = F.relu(self.fc1(batch))
         x = F.relu(self.fc2(x))
         x = F.relu(self.fc3(x))
@@ -108,12 +147,15 @@ class MLP4Hidden(nn.Module):
         return x
 
     def freeze(self):
+        """Freeze model parameters."""
         self.fc1.requires_grad_(False)
 
     def freeze_all(self):
+        """Freeze all model parameters."""
         self.fc1.requires_grad_(False)
         self.out.requires_grad_(False)
 
     def unfreeze_all(self):
+        """Unfreeze all model parameters."""
         self.fc1.requires_grad_(True)
         self.out.requires_grad_(True)

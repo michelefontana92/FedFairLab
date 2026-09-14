@@ -6,7 +6,13 @@ from .base_dataset import BaseDataset
 @register_dataset('insurance')
 class InsuranceDataset(BaseDataset):
 
+    """Implementation of InsuranceDataset."""
     def __init__(self,**kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super(InsuranceDataset, self).__init__(**kwargs)
         self.root = kwargs.get('root', 'data/Insurance')
         data_name = kwargs['filename']

@@ -6,9 +6,15 @@ from .base_dataset import BaseDataset
 @register_dataset('employment')
 class EmploymentDataset(BaseDataset):
 
+    """Implementation of EmploymentDataset."""
     def __init__(self,**kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super(EmploymentDataset, self).__init__(**kwargs)
-        self.root = kwargs.get('root', 'data/Employment')
+        self.root = kwargs.get('root', 'data/10_Clients/Employment')
         data_name = kwargs['filename']
 
         self.data_path = os.path.join(self.root, data_name)
@@ -28,6 +34,7 @@ class EmploymentDataset(BaseDataset):
                          'DREM']
         self.num_cols = ['AGEP']
         self.labels = [0,1]
-        self.clean_data_path = os.path.join(self.root,'employment_clean.csv')
+        self.clean_data_path = kwargs.get(
+            'clean_data_path', os.path.join(self.root, 'employment_clean.csv'))
         self.setup()
         

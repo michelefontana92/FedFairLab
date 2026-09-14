@@ -1,3 +1,4 @@
+from debug_utils import debug_print
 from .soft_confusion_matrix.fairness import *
 from .soft_confusion_matrix.performance import *
 from .surrogate_factory import register_surrogate
@@ -5,7 +6,13 @@ import torch
 
 @register_surrogate('diff_demographic_parity')
 class DifferentiableDemographicParitySurrogate:
+    """Implementation of DifferentiableDemographicParitySurrogate."""
     def __init__(self, **kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.surrogate_name = kwargs.get('surrogate_name', 'surrogate')
         self.weight = kwargs.get('weight', 1.0)
         self.group_name = kwargs.get('group_name')
@@ -23,11 +30,16 @@ class DifferentiableDemographicParitySurrogate:
         #print('Demographic Parity Surrogate on group:', self.group_name)
     
     def __call__(self, **kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         probabilities = kwargs.get('probabilities')
         assert probabilities is not None, 'probabilities must be provided'
         # Controllo NaN nei probabilities
         if torch.isnan(probabilities).any():
-            print('Probabilities contengono NaN!')
+            debug_print('Probabilities contengono NaN!')
             raise ValueError('Probabilities contiene NaN!')
         
         
@@ -56,7 +68,13 @@ class DifferentiableDemographicParitySurrogate:
         return dp - self.lower_bound
 @register_surrogate('diff_equal_opportunity')
 class DifferentiableEqualOpportunitySurrogate:
+    """Implementation of DifferentiableEqualOpportunitySurrogate."""
     def __init__(self,**kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.surrogate_name = kwargs.get('surrogate_name','surrogate')
         self.weight = kwargs.get('weight',1.0)
         self.group_name = kwargs.get('group_name')
@@ -69,6 +87,11 @@ class DifferentiableEqualOpportunitySurrogate:
         assert self.target_groups is not None, 'target_groups must be provided'
 
     def __call__(self,**kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         positive_mask = kwargs.get('positive_mask')
         
         group_masks = kwargs.get('group_masks')
@@ -77,7 +100,7 @@ class DifferentiableEqualOpportunitySurrogate:
         assert probabilities is not None, 'probabilities must be provided'
         # Controllo NaN nei probabilities
         if torch.isnan(probabilities).any():
-            print('Probabilities contengono NaN!')
+            debug_print('Probabilities contengono NaN!')
             raise ValueError('Probabilities contiene NaN!')
         
         
@@ -92,7 +115,7 @@ class DifferentiableEqualOpportunitySurrogate:
         
         # Controlla NaN in dp
         if torch.isnan(dp).any():
-            print('Equal Opportunity contiene NaN!')
+            debug_print('Equal Opportunity contiene NaN!')
             raise ValueError('Equal Opportunity contiene NaN!')
         
         if self.use_max:
@@ -102,7 +125,13 @@ class DifferentiableEqualOpportunitySurrogate:
 
 @register_surrogate('diff_predictive_equality')
 class DifferentiablePredictiveEqualitySurrogate:
+    """Implementation of DifferentiablePredictiveEqualitySurrogate."""
     def __init__(self,**kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.surrogate_name = kwargs.get('surrogate_name','surrogate')
         self.weight = kwargs.get('weight',1.0)
         self.group_name = kwargs.get('group_name')
@@ -115,6 +144,11 @@ class DifferentiablePredictiveEqualitySurrogate:
         assert self.target_groups is not None, 'target_groups must be provided'
         
     def __call__(self,**kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         positive_mask = kwargs.get('positive_mask')
         group_masks = kwargs.get('group_masks')
 
@@ -122,7 +156,7 @@ class DifferentiablePredictiveEqualitySurrogate:
         assert probabilities is not None, 'probabilities must be provided'
         # Controllo NaN nei probabilities
         if torch.isnan(probabilities).any():
-            print('Probabilities contengono NaN!')
+            debug_print('Probabilities contengono NaN!')
             raise ValueError('Probabilities contiene NaN!')
         
        
@@ -138,7 +172,7 @@ class DifferentiablePredictiveEqualitySurrogate:
         
         # Controlla NaN in dp
         if torch.isnan(dp).any():
-            print('Predictive Equality contiene NaN!')
+            debug_print('Predictive Equality contiene NaN!')
             raise ValueError('Predictive Equality contiene NaN!')
         if self.use_max:
             return torch.max(torch.zeros_like(dp),dp - self.lower_bound)
@@ -148,7 +182,13 @@ class DifferentiablePredictiveEqualitySurrogate:
 
 @register_surrogate('diff_equalized_odds')
 class DifferentiableEqualizedOddsSurrogate:
+    """Implementation of DifferentiableEqualizedOddsSurrogate."""
     def __init__(self,**kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.surrogate_name = kwargs.get('surrogate_name','surrogate')
         self.weight = kwargs.get('weight',1.0)
         self.group_name = kwargs.get('group_name')
@@ -163,13 +203,18 @@ class DifferentiableEqualizedOddsSurrogate:
     def __call__(self,**kwargs):
         #positive_mask = kwargs.get('positive_mask')
         
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         group_masks = kwargs.get('group_masks')
 
         probabilities = kwargs.get('probabilities')
         assert probabilities is not None, 'probabilities must be provided'
         # Controllo NaN nei probabilities
         if torch.isnan(probabilities).any():
-            print('Probabilities contengono NaN!')
+            debug_print('Probabilities contengono NaN!')
             raise ValueError('Probabilities contiene NaN!')
         
         assert group_masks is not None, 'group_masks must be provided'

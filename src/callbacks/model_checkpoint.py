@@ -1,5 +1,5 @@
 import os
-import torch
+from checkpoint_utils import load_trusted_checkpoint
 class ModelCheckpoint:
     """
     ModelCheckpoint is a class that saves the model based on the monitored metric.
@@ -30,6 +30,15 @@ class ModelCheckpoint:
     def __init__(self, save_dir, save_name, 
                  monitor='val_loss', mode='min',
                  check_fn = None):
+        """Initialize the object.
+        
+        Args:
+            save_dir: Directory where checkpoints are written.
+            save_name: Registered object name.
+            monitor: Metric name monitored by the callback.
+            mode: Optimization direction for the monitored metric.
+            check_fn: Callable or class being registered.
+        """
         self.save_dir = save_dir
         self.save_name = save_name
         self.monitor = monitor
@@ -44,17 +53,32 @@ class ModelCheckpoint:
             self.check = check_fn
 
     def set_check_fn(self, check_fn:callable):
+        """Set check fn.
+        
+        Args:
+            check_fn: Callable or class being registered.
+        """
         assert callable(check_fn), "Check Function must be callable"
         assert len(check_fn.__code__.co_varnames) == 1, "Check Function must have only one argument" 
         self.check = check_fn
 
     def check(self,**kwargs):
+        """Handle check.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         metrics = kwargs.get('metrics')
         if self.best is None or (self.mode == 'min' and metrics[self.monitor] < self.best) or (self.mode == 'max' and metrics[self.monitor] > self.best):    
             return True
         return False
     
     def __call__(self, **kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         save_fn = kwargs.get('save_fn')
         assert save_fn is not None, "Save Function is required for ModelCheckpoint"
         metrics = kwargs.get('metrics')
@@ -68,19 +92,40 @@ class ModelCheckpoint:
         return False
     
     def get_model_path(self):
+        """Return model path.
+        
+        Returns:
+            Requested result.
+        """
         return os.path.join(self.save_dir, self.save_name)
     
     def get_best(self):
+        """Return best.
+        
+        Returns:
+            Requested result.
+        """
         return self.best
     
     def get_best_metric(self):
+        """Return best metric.
+        
+        Returns:
+            Requested result.
+        """
         return {self.monitor:self.best}
     
     def reset(self):
+        """Reset."""
         self.best = None
 
     def get_best_model(self):
+        """Return best model.
+        
+        Returns:
+            Requested result.
+        """
         if self.best is not None:
-            return torch.load(self.get_model_path())
+            return load_trusted_checkpoint(self.get_model_path())
         else:
             raise ValueError("Best model not found. Please check if the model has been saved.")

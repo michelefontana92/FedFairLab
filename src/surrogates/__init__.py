@@ -1,9 +1,15 @@
+from . import adaptive_aggregation as _adaptive_aggregation
+from . import differentiable_fairness as _differentiable_fairness
+from . import differentiable_performance as _differentiable_performance
+from . import performance as _performance
+from . import wasserstein as _wasserstein
+from .base_surrogate import BaseBinarySurrogate, BaseSurrogate
 from .surrogate_factory import SurrogateFactory
-from .base_surrogate import BaseSurrogate,BaseBinarySurrogate
 from .surrogate_set import SurrogateFunctionSet
-from .differentiable_performance import *
-from .differentiable_fairness import *
-from .wasserstein import *
-from .performance import *
-from .adaptive_aggregation import *
 
+__all__ = [
+    "SurrogateFactory",
+    "BaseSurrogate",
+    "BaseBinarySurrogate",
+    "SurrogateFunctionSet",
+]

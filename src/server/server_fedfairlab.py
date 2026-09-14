@@ -1,3 +1,4 @@
+from debug_utils import debug_print
 from .server_base import BaseServer
 import ray
 
@@ -6,395 +7,610 @@ from callbacks.early_stopping import EarlyStopping
 from callbacks.model_checkpoint import ModelCheckpoint
 from loggers.wandb_logger import WandbLogger
 from functools import partial
-from .aggregators import AggregatorFactory
 import os
-import numpy as np
 import torch
 import copy
 from surrogates import SurrogateFactory
-from .utils import compute_group_cardinality,compute_global_score,collect_local_results,select_from_scores
+from .utils import compute_group_cardinality, compute_global_score
 from tqdm import tqdm
 import random
 import math
+from checkpoint_utils import load_trusted_checkpoint
+
+
+DISTILLATION_TASK_WEIGHT = 0.8
+DISTILLATION_TEMPERATURE = 2.0
+ENSEMBLE_WEIGHT_TEMPERATURE = 0.05
+TEACHER_SAMPLING_TEMPERATURE = 0.05
+
+
 class EarlyStoppingException(Exception):
+    """Raised internally to stop server training when early stopping triggers."""
     pass
 
-def compute_group_cardinality(group_name,sensitive_attributes):
-        for name,group_dict in sensitive_attributes:
-            if name == group_name:
-                total = 1
-                for key in group_dict.keys():
-                    total *= len(group_dict[key])
-                return total 
-        raise KeyError(f'Group {group_name} not found in sensitive attributes') 
 
-def average_dictionary_list(dictionary_list):
-    result = {k:0 for k in dictionary_list[0].keys()}
-    for d in dictionary_list:
-        for k,v in d.items():
-            result[k] += v
-    for k in result.keys():
-        result[k] /= len(dictionary_list)
-    return result
+def _resolve_server_patience(options):
+    """Return the patience used to select the global validation checkpoint."""
+    return int(options.get('global_patience', 10))
 
 
 @register_server("server_fedfairlab")
 class ServerFedFairLab(BaseServer):
-    
-    def __init__(self,**kwargs): 
+    """
+    FedFairLab server coordinating client updates and global aggregation.
+
+    The server implements the global phase of FedFairLab: teacher sampling from a
+    bounded history, local client mitigation, client-aligned ensemble-logit
+    construction, federated distillation via FedAvg, global scoring, and
+    checkpointing.
+    """
+
+    def __init__(self, **kwargs):
+        """
+        Initialize the server, scoring problems, callbacks, and global history.
+
+        Args:
+            **kwargs: Experiment configuration including model, client builders,
+                fairness metrics, sensitive groups, thresholds, performance
+                budget, server patience, federation size, history size,
+                aggregation/distillation rounds, and local client epochs used
+                during aggregation distillation.
+        """
 
         self.clients_init_fn_list = kwargs.get('clients_init_fn_list')
         self.model = kwargs.get('model')
-        self.loss = kwargs.get('loss')
-        self.metrics = kwargs.get('metrics')
         self.log_model = kwargs.get('log_model', False)
         self.project = kwargs.get('project_name', 'fedfairlab')
         self.id = kwargs.get('server_name', 'server')
-        self.checkpoint_dir = kwargs.get('checkpoint_dir','checkpoints')
-        self.checkpoint_name = kwargs.get('checkpoint_name','global_model.h5')
-        self.patience = kwargs.get('server_patience', 5)
+        self.checkpoint_dir = kwargs.get('checkpoint_dir', 'checkpoints')
+        self.checkpoint_name = kwargs.get('checkpoint_name', 'global_model.h5')
+        self.patience = _resolve_server_patience(kwargs)
         self.verbose = kwargs.get('verbose', False)
-        self.num_federated_iterations = kwargs.get('num_federated_iterations', 1)
+        self.num_federated_iterations = kwargs.get(
+            'num_federated_iterations', 1)
+        self.aggregation_epochs = max(1, kwargs.get('aggregation_epochs', 1))
+        self.aggregation_local_epochs = max(
+            1, kwargs.get('aggregation_local_epochs', 10))
+        self.aggregation_patience = max(
+            0, int(kwargs.get('aggregation_patience', 0)))
+        self.aggregation_min_delta = max(
+            0.0, float(kwargs.get('aggregation_min_delta', 1e-6)))
+        self.history_size = max(1, kwargs.get('history_size', 5))
+        self._last_teacher_sampling_diagnostics = {}
         self.num_classes = kwargs.get('num_classes', 2)
-        
+
         self.original_metrics_list = kwargs.get('metrics_list')
         self.original_groups_list = kwargs.get('groups_list')
         self.original_threshold_list = kwargs.get('threshold_list')
+        self.original_metrics_list = tuple(self.original_metrics_list or ())
+        self.original_groups_list = tuple(self.original_groups_list or ())
+        self.original_threshold_list = tuple(
+            self.original_threshold_list or ())
         self.sensitive_attributes = kwargs.get('sensitive_attributes')
         self.performance_constraint = kwargs.get('performance_constraint')
-        self.history_global=[]
-        self.current_global_model_in_history = False
-        self.fraction = kwargs.get('fraction', 0.5)
-        
+        self.performance_step = kwargs.get('performance_step', 0.0)
+        self.global_performance_reference = None
+        self.history_global = []
+        self.fraction = float(kwargs.get('fraction', 0.5))
+        if not 0 < self.fraction <= 1:
+            raise ValueError("Client fraction must be in the interval (0, 1].")
+
         self.callbacks = [
             EarlyStopping(patience=self.patience,
                           monitor='val_global_score',
                           mode='max'
                           ),
             ModelCheckpoint(save_dir=self.checkpoint_dir,
-                            save_name = self.checkpoint_name,
+                            save_name=self.checkpoint_name,
                             monitor='val_global_score',
                             mode='max')
-                          ]
-        
-        
+        ]
+
         self.logger = WandbLogger(
             project=self.project,
-            config= None,
+            config=None,
             id=self.id,
-            checkpoint_dir= self.checkpoint_dir,
-            checkpoint_path = self.checkpoint_name,
+            checkpoint_dir=self.checkpoint_dir,
+            checkpoint_path=self.checkpoint_name,
+            log_model=self.log_model,
             data_module=self.data if self.log_model else None
         )
-        
 
-        self.aggregator = AggregatorFactory().create('FedAvgAggregator')
-        self.problem = self._init_constrained_problem(use_adaptive_aggregation=True,**kwargs)
+        self.problem = self._init_constrained_problem(
+            use_adaptive_aggregation=True, **kwargs)
         self.global_problem = self._init_global_constrained_problem(**kwargs)
         self.aggregation_problem = self._init_aggregation_problem(**kwargs)
-        
-        self.aggregator = AggregatorFactory().create('FedAvgAggregator')
-        self.teachers = []
-        
+
         self.global_model = None
-        self.global_score = None
-        self.global_model_idx = None
-        self.history_per_client = {k:{} for k in range(len(self.clients_init_fn_list))}
-        for i in self.history_per_client.keys():
-            default_dict = {j:[] for j in range(len(self.clients_init_fn_list))}
-            self.history_per_client[i] = default_dict
-        # history_per_client[i][j] = list of scores of models evaluated on client i, coming from client j 
-        #print('History per client:',self.history_per_client)
-        print('Server initialized')
-
-    
-    def greedy_aggregator(self,**kwargs):
-        params_list = kwargs.get('params')
-        c1 = 100
-        tau=0.5
-        scores = []
-        for param in params_list:
-            score = self.evaluate(model_params=param['params'])
-            #print('Score:',score.keys())
-            scores.append(score['metrics']['val_global_score'])
-        scores = torch.tensor(scores)
-        argmax = torch.argmax(scores).item()
-        inv_scores = 1.0 / (scores + 1e-6) 
-        probabilities = torch.nn.functional.softmax(inv_scores / tau, dim=0)
-        selected= torch.multinomial(probabilities, num_samples=1).item()
-        return params_list[selected]['params'],params_list[argmax]['params'],scores[argmax].item()
-
-    def greedy_aggregator_list(self,**kwargs):
-        params_list = kwargs.get('params')
-        tau=kwargs.get('tau',0.5)
-        score = self.evaluate_list(model_params_list=[p['params'] for p in params_list])
-        scores=[s['metrics']['val_global_score'] for s in score]
-        scores = torch.tensor(scores)
-        selected,argmin = select_from_scores(scores,tau=tau)
-        return params_list[selected]['params'],params_list[argmin]['params'],scores[argmin].item(),argmin
+        debug_print('Server initialized')
 
     def aggregation_phase(self, **kwargs):
-        aggregation_epochs = 1
-        num_local_epochs = 10
+        """Distill the weighted local ensemble and return its best FedAvg model."""
+        aggregation_epochs = kwargs.get(
+            'aggregation_epochs', self.aggregation_epochs)
+        num_local_epochs = kwargs.get(
+            'num_local_epochs', self.aggregation_local_epochs)
         params = kwargs.get('params')
         model_params_list = [p['params'] for p in params]
         selected_clients = kwargs.get('selected_clients', self.clients)
+        teacher_model_params = kwargs.get(
+            'teacher_model_params', self.model.state_dict())
         assert len(model_params_list) > 0, "Model parameters are required"
 
-        # === Step 1: valutazione di tutti i modelli in un solo broadcast
         scores, model_eval_list = self.evaluate_list(
             model_params_list=model_params_list,
             return_metrics=True,
             log_results=True
         )
-        print(f"[Server] Scores: {scores}")
-        best_idx = torch.tensor(scores).argmax().item()
-        final_model_params = model_params_list[best_idx]
-        final_model_eval = model_eval_list[best_idx]
-        final_model_score = scores[best_idx]
+        ensemble_weights, weight_diagnostics = (
+            self._compute_ensemble_weights(scores)
+        )
+        candidate_diagnostics = self._candidate_aggregation_diagnostics(
+            scores=scores,
+            weights=ensemble_weights,
+            model_eval_list=model_eval_list,
+        )
 
-        # === Step 2: Setup problema di aggregazione
-        current_agg_problem = copy.deepcopy(self.aggregation_problem)
-        current_agg_problem['aggregation_teachers_list'] = model_params_list
+        distillation_problem = copy.deepcopy(self.aggregation_problem)
+        distillation_problem['aggregation_teachers_list'] = []
         for key in ['objective_function', 'original_objective_function', 'batch_objective_function']:
-            current_agg_problem[key].set_weights([s*100 for s in scores])
-        scores = torch.tensor(scores,dtype=torch.double)*100
-        #aggregation_weights = torch.nn.functional.softmax(scores,dim=0)
-        current_agg_problem['aggregation_weights'] = scores.tolist()
-        
-        candidate_model_params = copy.deepcopy(self.model.state_dict())
-        best_aggregated_score = -float('inf')
-        
-        # === Step 3: Aggregazione dei modelli per ensemble
-        for _ in range(aggregation_epochs):
-            handlers = [
+            distillation_problem[key].set_weights([1.0])
+        distillation_problem['aggregation_weights'] = [1.0]
+
+        student_params = copy.deepcopy(teacher_model_params)
+
+        client_train_logits = self.compute_client_ensemble_logits(
+            model_params_list=model_params_list,
+            aggregation_weights=ensemble_weights,
+            selected_clients=selected_clients,
+            use_training=True,
+        )
+        client_val_logits = self.compute_client_ensemble_logits(
+            model_params_list=model_params_list,
+            aggregation_weights=ensemble_weights,
+            selected_clients=selected_clients,
+            use_training=False,
+        )
+        ensemble_diagnostics = self._evaluate_ensemble_logits_metrics(
+            client_val_logits=client_val_logits,
+            selected_clients=selected_clients,
+        )
+        if not (
+            len(client_train_logits)
+            == len(client_val_logits)
+            == len(selected_clients)
+        ):
+            raise ValueError(
+                "Expected one train and validation ensemble target per client")
+
+        best_student_params = copy.deepcopy(student_params)
+        best_validation_kd_loss = self._evaluate_federated_distillation_loss(
+            model_params=student_params,
+            problem=distillation_problem,
+            client_val_logits=client_val_logits,
+            selected_clients=selected_clients,
+        )
+        best_distillation_epoch = 0
+        last_validation_kd_loss = best_validation_kd_loss
+        epochs_without_improvement = 0
+        aggregation_epochs_executed = 0
+        aggregation_early_stopped = 0
+
+        for aggregation_epoch in range(1, aggregation_epochs + 1):
+            aggregation_epochs_executed = aggregation_epoch
+            client_jobs = [
                 client.fit.remote(
-                    model_params=candidate_model_params,
-                    problem=current_agg_problem,
+                    model_params=student_params,
+                    problem=distillation_problem,
                     num_local_epochs=num_local_epochs,
-                    num_global_epochs=1
+                    num_global_epochs=1,
+                    aggregation_teacher_logits={
+                        'train': copy.deepcopy(train_logits),
+                        'val': copy.deepcopy(val_logits),
+                    },
                 )
-                for client in selected_clients
+                for client, train_logits, val_logits in zip(
+                    selected_clients, client_train_logits, client_val_logits)
             ]
-            results = ray.get(handlers)
-            new_model_list = [res['params'] for res in results]
-
-            # Rivalutazione dei modelli aggregati
-            agg_scores = self.evaluate_list(
-                model_params_list=new_model_list,
-                return_metrics=False,
-                log_results=True
+            client_results = ray.get(client_jobs)
+            student_params = self.fedavg_model_params(client_results)
+            last_validation_kd_loss = (
+                self._evaluate_federated_distillation_loss(
+                    model_params=student_params,
+                    problem=distillation_problem,
+                    client_val_logits=client_val_logits,
+                    selected_clients=selected_clients,
+                )
             )
+            min_delta = float(getattr(
+                self, 'aggregation_min_delta', 1e-6))
+            if last_validation_kd_loss < best_validation_kd_loss - min_delta:
+                best_validation_kd_loss = last_validation_kd_loss
+                best_distillation_epoch = aggregation_epoch
+                best_student_params = copy.deepcopy(student_params)
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                patience = int(getattr(self, 'aggregation_patience', 0))
+                if (
+                    patience > 0
+                    and epochs_without_improvement >= patience
+                ):
+                    aggregation_early_stopped = 1
+                    break
 
-            agg_scores = torch.tensor(agg_scores)
-            best_agg_idx = torch.argmax(agg_scores).item()
+        student_params = best_student_params
 
-            if agg_scores[best_agg_idx] > best_aggregated_score:
-                best_aggregated_score = agg_scores[best_agg_idx].item()
-                candidate_model_params = copy.deepcopy(new_model_list[best_agg_idx])
-
-        # === Step 4: Confronto finale
-        final_eval = self._broadcast_fn(
+        client_evaluations = self._broadcast_fn(
             'evaluate_constraints',
-            model_params=candidate_model_params,
+            model_params=student_params,
             problem=self.global_problem,
-            first_performance_constraint=self.performance_constraint < 1.0,
+            first_performance_constraint=self._has_performance_budget(),
             performance_constraint=self.performance_constraint,
             original_threshold_list=self.original_threshold_list,
             log_results=True
         )
-        
-        print(f'Final evaluation: {final_eval}')
-        final_score = compute_global_score(
-            performance_constraint=self.performance_constraint,
-            original_threshold_list=self.original_threshold_list,
-            eval_results=final_eval
+
+        final_model_eval = self._compute_global_score(
+            eval_results=client_evaluations,
+            update_performance_reference=True,
         )
-        final_score_value = final_score['metrics']['val_global_score']
+        final_model_eval['metrics'].update(weight_diagnostics)
+        final_model_eval['metrics'].update(candidate_diagnostics)
+        final_model_eval['metrics'].update(ensemble_diagnostics)
+        final_model_eval['metrics'].update({
+            'aggregation_best_distillation_loss': best_validation_kd_loss,
+            'aggregation_best_distillation_epoch': best_distillation_epoch,
+            'aggregation_last_distillation_loss': last_validation_kd_loss,
+            'aggregation_epochs_executed': aggregation_epochs_executed,
+            'aggregation_early_stopped': aggregation_early_stopped,
+            'aggregation_rounds_without_improvement': (
+                epochs_without_improvement
+            ),
+        })
+        for metric_name, metric_value in list(
+                final_model_eval['metrics'].items()):
+            if metric_name == 'val_f1' or metric_name.startswith(
+                    'val_demographic_parity_'):
+                final_model_eval['metrics'][
+                    f'aggregation_student_{metric_name}'] = float(metric_value)
+        return student_params, final_model_eval
 
-        print(f"[FedFairLab] Best original score:   {final_model_score:.4f}")
-        print(f"[FedFairLab] Ensemble model score:  {final_score_value:.4f}")
+    def _candidate_aggregation_diagnostics(
+            self, *, scores, weights, model_eval_list):
+        """Return flat logging metrics for local ensemble candidates."""
+        diagnostics = {}
+        for idx, (score, weight, evaluation) in enumerate(zip(
+                scores, weights, model_eval_list)):
+            prefix = f'aggregation_candidate_{idx}'
+            diagnostics[f'{prefix}_score'] = float(score)
+            diagnostics[f'{prefix}_weight'] = float(weight)
+            metrics = evaluation.get('metrics', {})
+            for metric_name, metric_value in metrics.items():
+                if metric_name == 'val_f1' or metric_name.startswith(
+                        'val_demographic_parity_'):
+                    diagnostics[f'{prefix}_{metric_name}'] = float(metric_value)
+        return diagnostics
 
-        if final_score_value > final_model_score:
-            final_model_params = candidate_model_params
-            final_model_eval = final_score
-            final_model_score = final_score_value
+    def _evaluate_ensemble_logits_metrics(
+            self, *, client_val_logits, selected_clients):
+        """Evaluate the ensemble targets on client validation splits."""
+        handlers = [
+            client.evaluate_precomputed_ensemble_logits.remote(
+                problem=self.global_problem,
+                ensemble_logits=copy.deepcopy(logits),
+            )
+            for client, logits in zip(selected_clients, client_val_logits)
+        ]
+        local_metrics = ray.get(handlers)
+        if not local_metrics:
+            return {}
+        common_keys = set(local_metrics[0])
+        for metrics in local_metrics[1:]:
+            common_keys.intersection_update(metrics)
+        return {
+            f'aggregation_ensemble_{metric_name}': sum(
+                float(metrics[metric_name]) for metrics in local_metrics
+            ) / len(local_metrics)
+            for metric_name in sorted(common_keys)
+            if metric_name == 'val_f1' or metric_name.startswith(
+                'val_demographic_parity_')
+        }
 
-        print(f"[FedFairLab] Final selected score:  {final_model_score:.4f}")
-        return final_model_params, final_model_eval
+    def _evaluate_federated_distillation_loss(
+            self, *, model_params, problem, client_val_logits,
+            selected_clients):
+        """Return the weighted mean validation KD loss across clients."""
+        if len(client_val_logits) != len(selected_clients):
+            raise ValueError(
+                'Expected one validation ensemble target per selected client')
+        handlers = [
+            client.evaluate_aggregation_distillation.remote(
+                model_params=copy.deepcopy(model_params),
+                problem=problem,
+                aggregation_teacher_logits={
+                    'val': copy.deepcopy(val_logits),
+                },
+            )
+            for client, val_logits in zip(
+                selected_clients, client_val_logits)
+        ]
+        evaluations = ray.get(handlers)
+        total_weight = sum(float(result.get('weight', 1.0))
+                           for result in evaluations)
+        if total_weight <= 0.0:
+            raise ValueError(
+                'Federated distillation evaluation requires positive weight')
+        return sum(
+            float(result['val_distillation_loss'])
+            * float(result.get('weight', 1.0))
+            for result in evaluations
+        ) / total_weight
 
+    def _compute_ensemble_weights(self, scores):
+        """Convert candidate global scores into normalized ensemble weights."""
+        if not scores:
+            raise ValueError('At least one candidate score is required')
 
-    def aggregation_phase_old(self,**kwargs):
-        aggregation_epochs = 3 #kwargs.get('aggregation_epochs',5)
-        num_aggregation_local_epochs = 3
-        params = kwargs.get('params')
-        model_params_list=[p['params'] for p in params]
-        assert len(model_params_list) > 0, "Model parameters are required"
-        #print('Length of model params list:',len(model_params_list))
-        results = self._broadcast_fn('evaluate_constraints_list',
-                                     model_params_list=copy.deepcopy(model_params_list),
-                            problem=self.global_problem,
-                            first_performance_constraint=self.performance_constraint<1.0,
-                            performance_constraint=self.performance_constraint,
-                            original_threshold_list=self.original_threshold_list,
-                            log_results=True)
-        #for r in results:
-        #    print('Results of eval: ',r)
-        b = [list(group) for group in zip(*results)]
-        #for br in b:
-        #    print('New results: ',br)
-        global_scores = []
-        original_scores = []
-        model_eval_list = []
-        for br in b:
-            scores = compute_global_score(
-                performance_constraint=self.performance_constraint,
-                original_threshold_list=self.original_threshold_list,
-                eval_results=br)
-            #print('Scores:',scores)
-            original_scores.append(scores['metrics']['val_global_score'])
-            global_scores.append(scores['metrics']['val_global_score']*10)
-            model_eval_list.append(scores)
-        
-        #global_scores += [h['score'] for h in self.history_global]
-        #model_params_list += [h['params'] for h in self.history_global]
+        score_tensor = torch.tensor(scores, dtype=torch.float32)
+        weight_tensor = torch.softmax(
+            score_tensor / ENSEMBLE_WEIGHT_TEMPERATURE, dim=0)
+        entropy = -torch.sum(
+            weight_tensor * torch.log(weight_tensor.clamp_min(1e-12)))
+        effective_teachers = torch.exp(entropy)
+        if weight_tensor.numel() > 1:
+            normalized_entropy = entropy / torch.log(torch.tensor(
+                float(weight_tensor.numel()), dtype=entropy.dtype))
+        else:
+            normalized_entropy = torch.ones_like(entropy)
 
-        #print('Setting scores for aggregation problem: ',global_scores)
-        current_aggregation_problem = copy.deepcopy(self.aggregation_problem)
-        current_aggregation_problem['aggregation_teachers_list'] = model_params_list 
-        current_aggregation_problem['objective_function'].set_weights(global_scores)
-        current_aggregation_problem['original_objective_function'].set_weights(global_scores)
-        current_aggregation_problem['batch_objective_function'].set_weights(global_scores)
-        current_aggregation_problem['aggregation_weights'] = global_scores
-        
-        global_scores = torch.tensor(global_scores)
-        
-        print('Global scores: ',global_scores)
-        
-        #print()
-        print('Aggregation....')
-        #print()
+        diagnostics = {
+            'aggregation_weight_temperature': ENSEMBLE_WEIGHT_TEMPERATURE,
+            'aggregation_weight_max': float(weight_tensor.max().item()),
+            'aggregation_weight_min': float(weight_tensor.min().item()),
+            'aggregation_weight_entropy': float(entropy.item()),
+            'aggregation_weight_normalized_entropy': float(
+                normalized_entropy.item()),
+            'aggregation_effective_teachers': float(
+                effective_teachers.item()),
+            'aggregation_score_min': float(score_tensor.min().item()),
+            'aggregation_score_max': float(score_tensor.max().item()),
+            'aggregation_score_spread': float(
+                (score_tensor.max() - score_tensor.min()).item()),
+        }
+        return weight_tensor.tolist(), diagnostics
 
-        sorted_global_scores = torch.argsort(torch.tensor(original_scores),descending=True)
-        selected = sorted_global_scores[0].item()
-        
-        final_aggregated_model_params = copy.deepcopy(model_params_list[selected])
-        final_aggregated_model_score = original_scores[selected] 
-        final_aggregated_model_eval = model_eval_list[selected]
-        candidate_model_params = copy.deepcopy(self.model.state_dict())
-        
-        
-        aggregated_model_params = copy.deepcopy(self.model.state_dict())
-        aggregated_model_score = -np.infty 
-        
-        for _ in range(aggregation_epochs):
-            aggregation_results = []
-            handlers = []
-            selected_clients=self._select_clients(fraction=self.fraction)
-            for _,client in enumerate(selected_clients):
-                handlers.append(getattr(client,'fit').remote(
-                    model_params=copy.deepcopy(aggregated_model_params),
-                            problem=current_aggregation_problem,
-                            num_local_epochs=num_aggregation_local_epochs,
-                            num_global_epochs=1
-                            
-                            ))
-            
-            for handler in handlers:
-                aggregation_results.append(ray.get(handler))
-
-            aggregated_models_list = [res['params'] for res in aggregation_results]
-            aggregated_model_params = self.aggregator(model=aggregated_model_params,
-                                                      params=aggregation_results)
-            eval_results = self._broadcast_fn('evaluate_constraints_list',
-                                        model_params_list=[copy.deepcopy(aggregated_model_params)],
-                                problem=self.global_problem,
-                                first_performance_constraint=self.performance_constraint<1.0,
-                                performance_constraint=self.performance_constraint,
-                                original_threshold_list=self.original_threshold_list,
-                                 log_results=True)
-            
-            b = [list(group) for group in zip(*eval_results)]
-            global_aggregation_scores = []
-            for br in b:
-                scores = compute_global_score(
-                    performance_constraint=self.performance_constraint,
-                    original_threshold_list=self.original_threshold_list,
-                    eval_results=br)
-                #print('Scores:',scores)
-                global_aggregation_scores.append(scores['metrics']['val_global_score'])
-                #global_scores.append((1-scores['metrics']['val_global_score'])*100)
-                #model_eval_list.append(scores)
-            #global_aggregation_scores = []
-
-            """
-            for result in eval_results:
-                scores = compute_global_score(
-                    performance_constraint=None,
-                    original_threshold_list=[],
-                    eval_results=result)
-                global_aggregation_scores.append(scores)
-            """
-            #print('Global aggregation scores:',global_aggregation_scores[0])
-            global_aggregation_scores = torch.tensor(global_aggregation_scores)
-            sorted_global_aggregation_scores = torch.argsort(global_aggregation_scores,descending=True)
-            selected = sorted_global_aggregation_scores[0].item()
-            selected_score = global_aggregation_scores[selected].item()
-            #aggregated_model_params = aggregated_models_list[selected]
-            
-            #print('Scores of aggregated models:',global_aggregation_scores)
-            #print('Selected model:',selected)
-            if selected_score > aggregated_model_score:
-                aggregated_model_score = selected_score
-                candidate_model_params = copy.deepcopy(aggregated_models_list[selected])
-                 
-        global_eval = self.evaluate(model_params=candidate_model_params)
-        print('Ensemble model score: ',(global_eval['metrics']['val_global_score']*100))
-        if global_eval['metrics']['val_global_score'] > final_aggregated_model_score:
-            final_aggregated_model_params = copy.deepcopy(candidate_model_params)
-            final_aggregated_model_score = global_eval['metrics']['val_global_score']
-            final_aggregated_model_eval = global_eval
-        print('Final global model score: ',(final_aggregated_model_score*100))
-        print('End of the aggregation')
-        #final_aggregated_model_params = copy.deepcopy(final_aggregated_model_params)
-        return final_aggregated_model_params,final_aggregated_model_eval
-    
-    def evaluate_list(self, model_params_list, *, return_metrics=False, log_results=False):
+    def fedavg_model_params(self, client_results):
         """
-        Valuta una lista di modelli su tutti i client.
+        Average client model parameters with FedAvg.
 
         Args:
-            model_params_list (List[dict]): Lista di state_dict dei modelli da valutare.
-            return_metrics (bool): Se True, restituisce anche i dizionari di metriche per ciascun modello.
-            log_results (bool): Se True, abilita il logging lato client.
+            client_results: List of dictionaries with ``params`` state dicts and
+                scalar ``weight`` values.
 
         Returns:
-            List[float] se return_metrics=False
-            (List[float], List[Dict]) se return_metrics=True
+            State dict containing the weighted average of client parameters.
         """
-        assert len(model_params_list) > 0, "model_params_list non può essere vuota"
+        total_weight = sum(result['weight'] for result in client_results)
+        assert total_weight > 0, "FedAvg requires positive client weights"
 
-        # Broadcast a tutti i client: ogni client restituisce una valutazione per ciascun modello
+        averaged_params = {}
+        for key in client_results[0]['params']:
+            averaged_params[key] = sum(
+                result['params'][key] * (result['weight'] / total_weight)
+                for result in client_results
+            )
+        return averaged_params
+
+    def _has_performance_budget(self):
+        """
+        Check whether the FairLAB-style performance budget is active.
+
+        Returns:
+            True when beta was provided and should be interpreted as the
+            tolerated drop from the best global F1 observed so far.
+        """
+        return self.performance_constraint is not None
+
+    def _compute_global_score(self, eval_results, update_performance_reference=False,
+                              split='val'):
+        """
+        Compute the server global score with FairLAB budget semantics.
+
+        The global performance penalty uses the same interpretation as the local
+        FairLAB constraints: ``F1_global >= p*_global - beta``. When requested,
+        ``p*_global`` is updated from the evaluated model before the final score is
+        returned.
+
+        Args:
+            eval_results: Per-client evaluation dictionaries.
+            update_performance_reference: If true, refresh ``p*_global`` from the
+                aggregated validation F1 before scoring.
+            split: Evaluation split. Test evaluation never updates the reference.
+
+        Returns:
+            Global score dictionary.
+        """
+        score_dict = compute_global_score(
+            performance_constraint=self.performance_constraint,
+            performance_reference=self.global_performance_reference,
+            original_threshold_list=self.original_threshold_list,
+            eval_results=eval_results,
+            constraint_weight=1.0,
+            split=split,
+        )
+
+        if split != 'val' and update_performance_reference:
+            raise ValueError(
+                "The performance reference can only be updated on validation data")
+
+        if (
+            update_performance_reference
+            and self._has_performance_budget()
+        ):
+            current_performance = float(score_dict['val_objective_fn'])
+            if self.global_performance_reference is None:
+                self.global_performance_reference = current_performance
+            else:
+                self.global_performance_reference = max(
+                    self.global_performance_reference,
+                    current_performance,
+                )
+            score_dict = compute_global_score(
+                performance_constraint=self.performance_constraint,
+                performance_reference=self.global_performance_reference,
+                original_threshold_list=self.original_threshold_list,
+                eval_results=eval_results,
+                constraint_weight=1.0,
+                split=split,
+            )
+
+        return score_dict
+
+    def update_global_history(self, model_params, eval_result):
+        """
+        Insert a global model into the bounded server history.
+
+        Args:
+            model_params: Global model state dict to store.
+            eval_result: Global evaluation dictionary containing
+                ``metrics['val_global_score']``.
+        """
+        score = eval_result['metrics']['val_global_score']
+        self.history_global.append({
+            'params': copy.deepcopy(model_params),
+            'score': score,
+            'eval': copy.deepcopy(eval_result),
+        })
+        self.history_global.sort(key=lambda item: item['score'], reverse=True)
+        self.history_global = self.history_global[:self.history_size]
+
+    def sample_teacher_from_history(self):
+        """
+        Sample a global teacher model from history using Boltzmann probabilities.
+
+        Returns:
+            Tuple ``(model_params, selected_idx)``. If history is empty, returns
+            the current server model and ``None``.
+        """
+        if len(self.history_global) == 0:
+            self._last_teacher_sampling_diagnostics = {
+                'history_teacher_selected_index': -1,
+                'history_teacher_sampling_temperature': float(
+                    TEACHER_SAMPLING_TEMPERATURE),
+                'history_teacher_pool_size': 0,
+            }
+            return copy.deepcopy(self.model.state_dict()), None
+
+        scores = torch.tensor(
+            [item['score'] for item in self.history_global],
+            dtype=torch.float32,
+        )
+        probabilities = torch.softmax(
+            scores / TEACHER_SAMPLING_TEMPERATURE, dim=0)
+        selected_idx = torch.multinomial(probabilities, num_samples=1).item()
+        selected = self.history_global[selected_idx]
+        diagnostics = {
+            'history_teacher_selected_index': selected_idx,
+            'history_teacher_selected_score': float(selected['score']),
+            'history_teacher_selected_probability': float(
+                probabilities[selected_idx]),
+            'history_teacher_sampling_temperature': float(
+                TEACHER_SAMPLING_TEMPERATURE),
+            'history_teacher_pool_size': len(self.history_global),
+        }
+        selected_metrics = selected.get('eval', {}).get('metrics', {})
+        if 'val_f1' in selected_metrics:
+            diagnostics['history_teacher_selected_val_f1'] = float(
+                selected_metrics['val_f1'])
+        for metric_name, metric_value in selected_metrics.items():
+            if metric_name.startswith('val_demographic_parity_'):
+                diagnostics[
+                    f'history_teacher_selected_{metric_name}'
+                ] = float(metric_value)
+        for idx, (item, probability) in enumerate(zip(
+                self.history_global, probabilities)):
+            prefix = f'history_teacher_candidate_{idx}'
+            diagnostics[f'{prefix}_score'] = float(item['score'])
+            diagnostics[f'{prefix}_probability'] = float(probability)
+            metrics = item.get('eval', {}).get('metrics', {})
+            if 'val_f1' in metrics:
+                diagnostics[f'{prefix}_val_f1'] = float(metrics['val_f1'])
+            for metric_name, metric_value in metrics.items():
+                if metric_name.startswith('val_demographic_parity_'):
+                    diagnostics[f'{prefix}_{metric_name}'] = float(
+                        metric_value)
+        self._last_teacher_sampling_diagnostics = diagnostics
+        # print(
+        #    f"[FedFairLab] Selected teacher {selected_idx} "
+        #    f"from history with score {selected['score']:.4f}"
+        # )
+        return copy.deepcopy(selected['params']), selected_idx
+
+    def compute_client_ensemble_logits(
+            self, model_params_list, aggregation_weights, selected_clients,
+            use_training=True):
+        """
+        Ask clients to compute weighted candidate logits on their own examples.
+
+        Args:
+            model_params_list: Candidate local models returned by selected clients.
+            aggregation_weights: Softmax-normalized global-score weights.
+            selected_clients: Ray actors participating in this aggregation round.
+            use_training: If true, query train logits; otherwise validation logits.
+
+        Returns:
+            List containing one client-aligned distillation target per client.
+
+        Row indices only have meaning within a client's private dataset. The
+        returned tensors are therefore kept separate and must never be averaged
+        element-wise across clients.
+        """
+        handlers = [
+            client.compute_weighted_ensemble_logits.remote(
+                model_params_list=model_params_list,
+                aggregation_weights=aggregation_weights,
+                problem=self.aggregation_problem,
+                use_training=use_training,
+            )
+            for client in selected_clients
+        ]
+        return ray.get(handlers)
+
+    def evaluate_list(self, model_params_list, *, return_metrics=False, log_results=False):
+        """
+        Evaluate candidate models across all clients and compute global scores.
+
+        Args:
+            model_params_list: List of model state dicts to evaluate.
+            return_metrics: If true, also return the full global metric dicts.
+            log_results: If true, allow clients to log local evaluation results.
+
+        Returns:
+            List of global scores, or ``(scores, metric_dicts)`` when
+            ``return_metrics`` is true.
+        """
+        assert len(
+            model_params_list) > 0, "model_params_list non può essere vuota"
+
         eval_results = self._broadcast_fn(
             'evaluate_constraints_list',
             model_params_list=model_params_list,
             problem=self.global_problem,
-            first_performance_constraint=self.performance_constraint < 1.0,
+            first_performance_constraint=self._has_performance_budget(),
             performance_constraint=self.performance_constraint,
             original_threshold_list=self.original_threshold_list,
             log_results=log_results
         )
 
-        # Aggrega per modello
-        zipped_results = list(zip(*eval_results))  # shape: num_models × num_clients
+        zipped_results = list(zip(*eval_results))
         global_scores = []
         model_eval_list = []
 
         for clientwise_eval in zipped_results:
-            score_dict = compute_global_score(
-                performance_constraint=self.performance_constraint,
-                original_threshold_list=self.original_threshold_list,
-                eval_results=clientwise_eval
+            score_dict = self._compute_global_score(
+                eval_results=clientwise_eval,
+                update_performance_reference=False,
             )
             global_scores.append(score_dict['metrics']['val_global_score'])
             model_eval_list.append(score_dict)
@@ -403,117 +619,196 @@ class ServerFedFairLab(BaseServer):
             return global_scores, model_eval_list
         return global_scores
 
-    
-    def evaluate(self,**kwargs):
+    def evaluate(self, **kwargs):
+        """
+        Evaluate one model globally or on a single client.
+
+        Args:
+            **kwargs: Requires ``model_params``. Optional ``client_id`` restricts
+                evaluation to a single client.
+
+        Returns:
+            Global-score dictionary produced by ``compute_global_score``.
+        """
         model_params = kwargs.get('model_params')
-        client_id = kwargs.get('client_id')     
-       
+        client_id = kwargs.get('client_id')
+        split = kwargs.get('split', 'val')
+        if split not in {'val', 'test'}:
+            raise ValueError(f"Unsupported evaluation split: {split}")
+
         assert model_params is not None, "Model parameters are required"
         if client_id is None:
             results = self._broadcast_fn('evaluate_constraints',
-                            model_params=copy.deepcopy(model_params),
-                            problem=self.global_problem,
-                            first_performance_constraint=self.performance_constraint<1.0,
-                            performance_constraint=self.performance_constraint,
-                            original_threshold_list=self.original_threshold_list)
-        
-        else: 
+                                         model_params=copy.deepcopy(
+                                             model_params),
+                                         problem=self.global_problem,
+                                         first_performance_constraint=self._has_performance_budget(),
+                                         performance_constraint=self.performance_constraint,
+                                         original_threshold_list=self.original_threshold_list,
+                                         split=split,
+                                         log_results=kwargs.get('log_results', split == 'val'))
+
+        else:
             handler = self.clients[client_id].evaluate_constraints.remote(model_params=copy.deepcopy(model_params),
-                            problem=self.global_problem,
-                            first_performance_constraint=self.performance_constraint<1.0,
-                            performance_constraint=self.performance_constraint,
-                            original_threshold_list=self.original_threshold_list)
-        
+                                                                          problem=self.global_problem,
+                                                                          first_performance_constraint=self._has_performance_budget(),
+                                                                              performance_constraint=self.performance_constraint,
+                                                                              original_threshold_list=self.original_threshold_list,
+                                                                              split=split,
+                                                                              log_results=kwargs.get('log_results', split == 'val'))
+
             results = [ray.get(handler)]
-        #print('Length of global results:',len(results))  
-        global_scores = compute_global_score(
-            performance_constraint=self.performance_constraint,
-            original_threshold_list=self.original_threshold_list,
-            eval_results=results)
+        # print('Length of global results:',len(results))
+        global_scores = self._compute_global_score(
+            eval_results=results,
+            update_performance_reference=kwargs.get(
+                'update_performance_reference', False),
+            split=split,
+        )
         return global_scores
 
-    def _create_clients(self,clients_init_fn_list):
-        client_list = [client_init_fn() 
-                for client_init_fn in clients_init_fn_list]
-        #print('Clients:',client_list)
+    def _create_clients(self, clients_init_fn_list):
+        """
+        Instantiate all client actors from builder-provided callables.
+
+        Args:
+            clients_init_fn_list: List of partial functions creating clients.
+
+        Returns:
+            List of client actor handles.
+        """
+        client_list = [client_init_fn()
+                       for client_init_fn in clients_init_fn_list]
+        # print('Clients:',client_list)
         return client_list
-    
-    def _init_constrained_problem(self,**kwargs):
-        use_adaptive_aggregation = kwargs.get('use_adaptive_aggregation',False)
+
+    def _init_constrained_problem(self, **kwargs):
+        """
+        Build the client-side local constrained optimization problem.
+
+        Args:
+            **kwargs: Global experiment configuration, including fairness metrics,
+                groups, thresholds, performance budget and number of classes.
+
+        Returns:
+            Problem dictionary consumed by client orchestrators.
+        """
+        use_adaptive_aggregation = kwargs.get(
+            'use_adaptive_aggregation', False)
+        performance_score_surrogate = (
+            'multiclass_f1'
+            if self.num_classes > 2
+            else 'binary_f1'
+        )
         if use_adaptive_aggregation:
-            objective_function = SurrogateFactory.create(name='adaptive_aggregation_f1_10', surrogate_name='adaptive_aggregation', weight=1, average='weighted')
-            #objective_function = SurrogateFactory.create(name='performance', surrogate_name='adaptive_aggregation', weight=1, average='weighted')
-            original_objective_function = SurrogateFactory.create(name='multiclass_f1', mode='max',surrogate_name='multiclass_f1', weight=1, average='weighted')
-            #batch_objective_function = SurrogateFactory.create(name='performance_batch', surrogate_name='cross_entropy', weight=1, average='weighted')
-            batch_objective_function = SurrogateFactory.create(name='batch_adaptive_aggregation_f1_10', surrogate_name='multiclass_f1', weight=1, average='weighted')
+            objective_function = SurrogateFactory.create(
+                name='fedfairlab_local_adaptive_objective',
+                surrogate_name='fedfairlab_local_adaptive',
+                weight=1,
+                average='weighted',
+                xi=DISTILLATION_TASK_WEIGHT,
+                temperature=DISTILLATION_TEMPERATURE)
+            original_objective_function = SurrogateFactory.create(
+                name=performance_score_surrogate,
+                mode='max',
+                surrogate_name=performance_score_surrogate,
+                weight=1,
+                average='weighted')
+            batch_objective_function = SurrogateFactory.create(
+                name='fedfairlab_local_adaptive_batch_objective',
+                surrogate_name='fedfairlab_local_adaptive_batch',
+                weight=1,
+                average='weighted',
+                xi=DISTILLATION_TASK_WEIGHT,
+                temperature=DISTILLATION_TEMPERATURE)
         else:
-            objective_function = SurrogateFactory.create(name='performance', surrogate_name='cross_entropy', weight=1, average='weighted')
-            original_objective_function = SurrogateFactory.create(name='multiclass_f1', mode='max',surrogate_name='multiclass_f1', weight=1, average='weighted')
-            batch_objective_function = SurrogateFactory.create(name='performance_batch', surrogate_name='cross_entropy', weight=1, average='weighted')
-        
-        
+            objective_function = SurrogateFactory.create(
+                name='performance', surrogate_name='cross_entropy', weight=1, average='weighted')
+            original_objective_function = SurrogateFactory.create(
+                name=performance_score_surrogate,
+                mode='max',
+                surrogate_name=performance_score_surrogate,
+                weight=1,
+                average='weighted')
+            batch_objective_function = SurrogateFactory.create(
+                name='performance_batch', surrogate_name='cross_entropy', weight=1, average='weighted')
+
         inequality_constraints = []
         macro_constraints = []
         shared_macro_constraints = []
         idx_constraint = 0
         all_group_ids = {}
-        if self.performance_constraint < 1.0:
-            inequality_constraints = [SurrogateFactory.create(name='multiclass_f1', 
+        if self._has_performance_budget():
+            # Constraint 0 encourages improvement p >= p* + rho. Constraint 1
+            # is the budget floor p >= p* - beta. Both are soft FairLAB
+            # constraints and p* is initialized/updated from validation only.
+            performance_surrogate = 'multiclass_f1' if self.num_classes > 2 else 'binary_f1'
+            inequality_constraints = [
+                SurrogateFactory.create(name=performance_surrogate,
                                     surrogate_name='cross_entropy', 
                                     weight=1, average='weighted', 
-                                    upper_bound=self.performance_constraint,
-                                    use_max=False)] 
-            idx_constraint = 1
-            macro_constraints = [[0]]
+                                    upper_bound=1.0,
+                                    use_max=False),
+                SurrogateFactory.create(name=performance_surrogate, 
+                                    surrogate_name='cross_entropy', 
+                                    weight=1, average='weighted', 
+                                    upper_bound=1.0,
+                                    use_max=False)
+            ]
+            idx_constraint = 2
+            macro_constraints = [[0, 1]]
             shared_macro_constraints = [0]
 
-        for metric,group,threshold in zip(self.original_metrics_list,
-                                          self.original_groups_list,
-                                          self.original_threshold_list):
-            
-            group_cardinality = compute_group_cardinality(group,sensitive_attributes=self.sensitive_attributes)
+        for metric, group, threshold in zip(self.original_metrics_list,
+                                            self.original_groups_list,
+                                            self.original_threshold_list):
+
+            group_cardinality = compute_group_cardinality(
+                group, sensitive_attributes=self.sensitive_attributes)
             macro_constraint = []
             current_group_ids = {group: list(range(group_cardinality))}
             all_group_ids.update(current_group_ids)
             for i in range(group_cardinality):
-                for j in range(i+1,group_cardinality):
+                for j in range(i+1, group_cardinality):
                     if self.num_classes == 2:
                         constraint = SurrogateFactory.create(name=f'diff_{metric}',
-                                                        surrogate_name=f'diff_{metric}_{group}',
-                                                        surrogate_weight=1,
-                                                        average='weighted',
-                                                        group_name=group,
-                                                        unique_group_ids={group: list(range(group_cardinality))},
-                                                        lower_bound=threshold,
-                                                        use_max=False,
-                                                        target_groups=torch.tensor([i, j]))
-                    
+                                                             surrogate_name=f'diff_{metric}_{group}',
+                                                             surrogate_weight=1,
+                                                             average='weighted',
+                                                             group_name=group,
+                                                             unique_group_ids={group: list(
+                                                                 range(group_cardinality))},
+                                                             lower_bound=threshold,
+                                                             use_max=False,
+                                                             target_groups=torch.tensor([i, j]))
+
                         inequality_constraints.append(constraint)
                         macro_constraint.append(idx_constraint)
                         idx_constraint += 1
                     else:
                         for c in range(self.num_classes):
                             constraint = SurrogateFactory.create(name=f'diff_{metric}',
-                                                            surrogate_name=f'diff_{metric}_{group}',
-                                                            surrogate_weight=1,
-                                                            average='weighted',
-                                                            group_name=group,
-                                                            unique_group_ids={group: list(range(group_cardinality))},
-                                                            lower_bound=threshold,
-                                                            use_max=False,
-                                                            target_groups=torch.tensor([i, j]),
-                                                            target_class = c
-                                                            )
+                                                                 surrogate_name=f'diff_{metric}_{group}',
+                                                                 surrogate_weight=1,
+                                                                 average='weighted',
+                                                                 group_name=group,
+                                                                 unique_group_ids={group: list(
+                                                                     range(group_cardinality))},
+                                                                 lower_bound=threshold,
+                                                                 use_max=False,
+                                                                 target_groups=torch.tensor(
+                                                                     [i, j]),
+                                                                 target_class=c
+                                                                 )
                             inequality_constraints.append(constraint)
                             macro_constraint.append(idx_constraint)
                             idx_constraint += 1
-            macro_constraints.append(macro_constraint)       
+            macro_constraints.append(macro_constraint)
 
         inequality_constraints = inequality_constraints
         macro_constraints = macro_constraints
         shared_macro_constraints = shared_macro_constraints
         all_group_ids = all_group_ids
-
 
         problem = {
             'name': 'local_problem',
@@ -525,29 +820,56 @@ class ServerFedFairLab(BaseServer):
             'shared_macro_constraints': shared_macro_constraints,
             'all_group_ids': all_group_ids,
             'aggregation_teachers_list': [],
-            'num_classes': self.num_classes
+            'num_classes': self.num_classes,
+            'performance_constraint': self.performance_constraint,
+            'performance_step': self.performance_step,
         }
-        print('All group ids: ', all_group_ids)
-        print('Macro constraints: ', macro_constraints)
-        print('Num of macro constraints: ', len(macro_constraints)) 
-        #print('Inequality constraints: ', inequality_constraints)
-        print('Num of inequality constraints: ', len(inequality_constraints))
-        return problem           
+        debug_print('All group ids: ', all_group_ids)
+        debug_print('Macro constraints: ', macro_constraints)
+        debug_print('Num of macro constraints: ', len(macro_constraints))
+        # print('Inequality constraints: ', inequality_constraints)
+        debug_print('Num of inequality constraints: ', len(inequality_constraints))
+        return problem
 
-    def _init_aggregation_problem(self,**kwargs):
-       
-        objective_function = SurrogateFactory.create(name='adaptive_aggregation_f1_8', surrogate_name='adaptive_aggregation', weight=1, average='weighted')
-        original_objective_function = SurrogateFactory.create(name='adaptive_aggregation_f1_8_max', surrogate_name='multiclass_f1', weight=1, average='weighted')
-        batch_objective_function = SurrogateFactory.create(name='adaptive_aggregation_f1_8', surrogate_name='cross_entropy', weight=1, average='weighted')
+    def _init_aggregation_problem(self, **kwargs):
+        """
+        Build the unconstrained problem used during global distillation.
+
+        Args:
+            **kwargs: Experiment configuration used to derive group metadata.
+
+        Returns:
+            Problem dictionary for the aggregation/distillation phase.
+        """
+
+        objective_function = SurrogateFactory.create(
+            name='fedfairlab_ensemble_distillation',
+            surrogate_name='fedfairlab_ensemble_distillation',
+            weight=1,
+            average='weighted',
+            temperature=DISTILLATION_TEMPERATURE)
+        original_objective_function = SurrogateFactory.create(
+            name='fedfairlab_ensemble_distillation_score',
+            surrogate_name='fedfairlab_ensemble_distillation_score',
+            weight=1,
+            average='weighted',
+            temperature=DISTILLATION_TEMPERATURE)
+        batch_objective_function = SurrogateFactory.create(
+            name='fedfairlab_ensemble_distillation_batch',
+            surrogate_name='fedfairlab_ensemble_distillation_batch',
+            weight=1,
+            average='weighted',
+            temperature=DISTILLATION_TEMPERATURE)
         all_group_ids = {}
-        for metric,group,threshold in zip(self.original_metrics_list,
-                                          self.original_groups_list,
-                                          self.original_threshold_list):
-            
-            group_cardinality = compute_group_cardinality(group,sensitive_attributes=self.sensitive_attributes)
+        for metric, group, threshold in zip(self.original_metrics_list,
+                                            self.original_groups_list,
+                                            self.original_threshold_list):
+
+            group_cardinality = compute_group_cardinality(
+                group, sensitive_attributes=self.sensitive_attributes)
             current_group_ids = {group: list(range(group_cardinality))}
             all_group_ids.update(current_group_ids)
-           
+
         problem = {
             'name': 'aggregation_problem',
             'original_objective_function': original_objective_function,
@@ -558,78 +880,117 @@ class ServerFedFairLab(BaseServer):
             'shared_macro_constraints': [],
             'all_group_ids': all_group_ids,
             'aggregation_teachers_list': [],
-            'num_classes': self.num_classes
-            
+            'num_classes': self.num_classes,
+            'performance_constraint': self.performance_constraint,
+            'performance_step': self.performance_step,
+
         }
-        print('Aggregation: All group ids: ', all_group_ids)
+        debug_print('Aggregation: All group ids: ', all_group_ids)
         return problem
-    
-    def _init_global_constrained_problem(self,**kwargs):
-        objective_function = SurrogateFactory.create(name='performance', surrogate_name='cross_entropy', weight=1, average='weighted')
-        batch_objective_function = SurrogateFactory.create(name='performance_batch', surrogate_name='cross_entropy', weight=1, average='weighted')
-        original_objective_function = SurrogateFactory.create(name='multiclass_f1', mode='max',surrogate_name='multiclass_f1', weight=1, average='weighted')
-        
+
+    def _init_global_constrained_problem(self, **kwargs):
+        """
+        Build the server-side global evaluation problem.
+
+        The problem mirrors the fairness and performance requirements used for
+        global scoring, but is evaluated by broadcasting model parameters to all
+        clients and aggregating their local metrics.
+
+        Args:
+            **kwargs: Experiment configuration with fairness requirements.
+
+        Returns:
+            Problem dictionary used for global evaluation.
+        """
+        objective_function = SurrogateFactory.create(
+            name='performance', surrogate_name='cross_entropy', weight=1, average='weighted')
+        batch_objective_function = SurrogateFactory.create(
+            name='performance_batch', surrogate_name='cross_entropy', weight=1, average='weighted')
+        performance_score_surrogate = (
+            'multiclass_f1'
+            if self.num_classes > 2
+            else 'binary_f1'
+        )
+        original_objective_function = SurrogateFactory.create(
+            name=performance_score_surrogate,
+            mode='max',
+            surrogate_name=performance_score_surrogate,
+            weight=1,
+            average='weighted')
+
         inequality_constraints = []
         macro_constraints = []
         shared_macro_constraints = []
         idx_constraint = 0
         all_group_ids = {}
-        if self.performance_constraint < 1.0:
-            inequality_constraints = [SurrogateFactory.create(name='multiclass_f1', 
+        if self._has_performance_budget():
+            performance_surrogate = 'multiclass_f1' if self.num_classes > 2 else 'binary_f1'
+            inequality_constraints = [
+                SurrogateFactory.create(name=performance_surrogate, 
                                     surrogate_name='cross_entropy', 
                                     weight=1, average='weighted', 
                                     upper_bound=1.0,
-                                    use_max=False)] 
-            idx_constraint = 1
-            macro_constraints = [[0]]
+                                    use_max=False),
+                SurrogateFactory.create(name=performance_surrogate, 
+                                    surrogate_name='cross_entropy', 
+                                    weight=1, average='weighted', 
+                                    upper_bound=1.0,
+                                    use_max=False)
+            ]
+            idx_constraint = 2
+            macro_constraints = [[0, 1]]
             shared_macro_constraints = [0]
 
-        for metric,group,_ in zip(self.original_metrics_list,
-                                          self.original_groups_list,
-                                          self.original_threshold_list):
-            group_cardinality = compute_group_cardinality(group,sensitive_attributes=self.sensitive_attributes)
+        for metric, group, _ in zip(self.original_metrics_list,
+                                    self.original_groups_list,
+                                    self.original_threshold_list):
+            group_cardinality = compute_group_cardinality(
+                group, sensitive_attributes=self.sensitive_attributes)
             macro_constraint = []
             current_group_ids = {group: list(range(group_cardinality))}
             all_group_ids.update(current_group_ids)
             for i in range(group_cardinality):
-                for j in range(i+1,group_cardinality):
+                for j in range(i+1, group_cardinality):
                     if self.num_classes == 2:
                         constraint = SurrogateFactory.create(name=f'diff_{metric}',
-                                                        surrogate_name=f'diff_{metric}_{group}',
-                                                        surrogate_weight=1,
-                                                        average='weighted',
-                                                        group_name=group,
-                                                        unique_group_ids={group: list(range(group_cardinality))},
-                                                        lower_bound=0.0,
-                                                        use_max=True,
-                                                        target_groups=torch.tensor([i, j])
-                                                        )
+                                                             surrogate_name=f'diff_{metric}_{group}',
+                                                             surrogate_weight=1,
+                                                             average='weighted',
+                                                             group_name=group,
+                                                             unique_group_ids={group: list(
+                                                                 range(group_cardinality))},
+                                                             lower_bound=0.0,
+                                                             use_max=True,
+                                                             target_groups=torch.tensor(
+                                                                 [i, j])
+                                                             )
                         inequality_constraints.append(constraint)
                         macro_constraint.append(idx_constraint)
                         idx_constraint += 1
                     else:
                         for c in range(self.num_classes):
                             constraint = SurrogateFactory.create(name=f'diff_{metric}',
-                                                            surrogate_name=f'diff_{metric}_{group}',
-                                                            surrogate_weight=1,
-                                                            average='weighted',
-                                                            group_name=group,
-                                                            unique_group_ids={group: list(range(group_cardinality))},
-                                                            lower_bound=0.0,
-                                                            use_max=True,
-                                                            target_groups=torch.tensor([i, j]),
-                                                            target_class = c
-                                                            )
+                                                                 surrogate_name=f'diff_{metric}_{group}',
+                                                                 surrogate_weight=1,
+                                                                 average='weighted',
+                                                                 group_name=group,
+                                                                 unique_group_ids={group: list(
+                                                                     range(group_cardinality))},
+                                                                 lower_bound=0.0,
+                                                                 use_max=True,
+                                                                 target_groups=torch.tensor(
+                                                                     [i, j]),
+                                                                 target_class=c
+                                                                 )
                             inequality_constraints.append(constraint)
                             macro_constraint.append(idx_constraint)
                             idx_constraint += 1
-            macro_constraints.append(macro_constraint)       
+            macro_constraints.append(macro_constraint)
 
         inequality_constraints = inequality_constraints
         macro_constraints = macro_constraints
         shared_macro_constraints = shared_macro_constraints
         all_group_ids = all_group_ids
-
 
         problem = {
             'name': 'global_problem',
@@ -641,328 +1002,281 @@ class ServerFedFairLab(BaseServer):
             'shared_macro_constraints': shared_macro_constraints,
             'all_group_ids': all_group_ids,
             'aggregation_teachers_list': [],
-            'num_classes': self.num_classes
+            'num_classes': self.num_classes,
+            'performance_constraint': self.performance_constraint,
+            'performance_step': self.performance_step,
         }
-        print('All group ids: ', all_group_ids)
-        print('Macro constraints: ', macro_constraints)
-        print('Num of macro constraints: ', len(macro_constraints)) 
-        #print('Inequality constraints: ', inequality_constraints)
-        print('Num of inequality constraints: ', len(inequality_constraints))
-        return problem 
-    
-    def _select_clients(self,fraction=1.0):
+        debug_print('All group ids: ', all_group_ids)
+        debug_print('Macro constraints: ', macro_constraints)
+        debug_print('Num of macro constraints: ', len(macro_constraints))
+        # print('Inequality constraints: ', inequality_constraints)
+        debug_print('Num of inequality constraints: ', len(inequality_constraints))
+        return problem
+
+    def _select_clients(self, fraction=1.0):
+        """
+        Sample clients for the current federated round.
+
+        Args:
+            fraction: Fraction of available clients to sample.
+
+        Returns:
+            Tuple ``(selected_indices, selected_clients)``.
+        """
         assert 0 < fraction <= 1, "Fraction must be between 0 and 1"
-        num_clients = max(1,math.ceil(len(self.clients)* fraction))
+        num_clients = max(1, math.ceil(len(self.clients) * fraction))
         selected_indices = random.sample(range(len(self.clients)), num_clients)
         selected_clients = [self.clients[i] for i in selected_indices]
-        print(f'[Server] Selected clients {[s+1 for s in selected_indices]} for this round')
-        return selected_clients
-    
-    def _broadcast_fn(self,fn_name,**kwargs):
-        assert isinstance(fn_name,str), "fn_name must be a string"
+        debug_print(
+            f'[Server] Selected clients {[s+1 for s in selected_indices]} for this round')
+        return selected_indices, selected_clients
+
+    def _broadcast_fn(self, fn_name, **kwargs):
+        """
+        Invoke a named RPC method on a set of clients.
+
+        Args:
+            fn_name: Client method name to call.
+            **kwargs: Arguments forwarded to each client. Optional
+                ``selected_clients`` overrides broadcasting to all clients.
+
+        Returns:
+            List of resolved Ray results in client order.
+        """
+        assert isinstance(fn_name, str), "fn_name must be a string"
         selected_clients = kwargs.get('selected_clients', self.clients)
         handlers = []
         results = []
-        
+
         for client in selected_clients:
-            assert hasattr(client,fn_name), f"Client does not have {fn_name} method"
-            handlers.append(getattr(client,fn_name).remote(**kwargs))
+            assert hasattr(
+                client, fn_name), f"Client does not have {fn_name} method"
+            handlers.append(getattr(client, fn_name).remote(**kwargs))
         for handler in handlers:
             results.append(ray.get(handler))
         return results
-    
-    def _evaluate_best_model(self):
-        global_model = torch.load(self.checkpoint_path)
-        self.model.load_state_dict(global_model)
-        global_scores = self.evaluate(model_params=self.model.state_dict())
-        final_scores ={}
-        for key,v in global_scores['metrics'].items():
-            final_scores[f'final_{key}'] = v
-        self.logger.log(final_scores)
 
-    def _evaluate_global_model(self,best_model=False):
-        if best_model:
-            scores = self._broadcast_fn('evaluate_best_model',
-                            global_model=self.model)
-        else: 
-            scores = self._broadcast_fn('evaluate',
-                            global_model=self.model)    
-        global_scores = {}
-        for score in scores:
-            for kind in score.keys():
-                for metric in score[kind].keys():
-                    name = f'global_{kind}_{metric}'
-                    if name not in global_scores:
-                        global_scores[name] = []
-                    global_scores[name].append(score[kind][metric])
-        for metric in global_scores:
-            global_scores[metric] = np.mean(global_scores[metric])
+    def setup(self, **kwargs):
+        """
+        Instantiate clients and initialize per-client local model state.
 
-        return global_scores
-
-    
-    def setup(self,**kwargs):
-        self.checkpoint_path = os.path.join(self.checkpoint_dir,self.checkpoint_name)
+        Args:
+            **kwargs: Optional setup payload kept for interface compatibility.
+        """
+        self.checkpoint_path = os.path.join(
+            self.checkpoint_dir, self.checkpoint_name)
         self.clients = self._create_clients(
             self.clients_init_fn_list)
+        self.client_model_params = [
+            copy.deepcopy(self.model.state_dict())
+            for _ in self.clients
+        ]
         self._broadcast_fn('setup',
                            global_model_ckpt_path=self.checkpoint_path)
-    
-    
-    def _update_history(self,results):
-        # in posizione i di results ci sono le valutazioni del modello del client i sui vari clients
-        # results[i][j] è il risultato della valutazione del modello del client i sul client j
-        for i, res in enumerate(results):
-            for j, score in enumerate(res):
-                self.history_per_client[i][j].append(score)
-    
-    def select_new_teachers(self,**kwargs):
-        #global_score = kwargs.get('global_score')
-        global_model_idx = kwargs.get('global_model_idx')
-        if global_model_idx is None:
-            print('No global model index provided, returning empty list of teachers')
-            return []
-        
-        teachers = {k:[] for k in self.history_per_client.keys()}
-        for i in self.history_per_client.keys():
-            teachers_per_client = []
-            scores_per_client = []
-            indexes = []
-            global_model_score = self.last_round_scores[i][global_model_idx]
 
-            for j in self.history_per_client.keys(): 
-                history = self.history_per_client[i][j]
-                if len(history) > 0:
-                    if j==global_model_idx:
-                        scores = [h['score'] for idx,h in enumerate(history) if h['score'] < global_model_score and idx < len(history)-1 and idx != i] 
-                        indexes = [idx for idx,h in enumerate(history) if h['score'] < global_model_score and idx < len(history)-1 and idx != i] 
-                    else:
-                        scores = [h['score'] for idx,h in enumerate(history) if h['score'] < global_model_score  and idx != i]
-                        indexes = [idx for idx,h in enumerate(history) if h['score'] < global_model_score  and idx != i] 
-                    if len(scores) > 0:
-                        selected,_ = select_from_scores(torch.tensor(scores))
-                        teachers_per_client.append(copy.deepcopy(history[indexes[selected]]['model_params']))
-                        scores_per_client.append(history[indexes[selected]]['score']*100)
-                    #real_scores_per_client.append(history[selected]['score']*10)
-            
-            if len(scores_per_client) >0:
-                sorted_scores_idx = np.argsort(scores_per_client)
-                selected_teachers = [teachers_per_client[k] for k in sorted_scores_idx] 
-                teachers[i] = selected_teachers[:1]
+    def save(self, metrics, path):
+        """
+        Save the current global model and associated metrics.
 
-            """
-            if len(teachers_per_client) > 0:
-                #print(f'Real scores per client (target = {i}):',real_scores_per_client)
-                #print(f'Scores per client (target = {i}):',scores_per_client)
-                scores_per_client = torch.tensor(scores_per_client)
-                #probs = torch.softmax(-scores_per_client / 0.5, dim=0)
-                probs =(scores_per_client - scores_per_client.min()) / (scores_per_client.max() - scores_per_client.min())
-                alpha = 2.0  # controlla la "bruschezza"
-                probs = torch.exp(-probs * alpha)
-                #print(f'Probabilities (target = {i}):',probs)
-                selected_teachers_mask = torch.bernoulli(probs).bool().view(-1)
-                #print('Selected teachers mask:',selected_teachers_mask)
-                selected_teachers = [teachers_per_client[k] for k in range(len(teachers_per_client)) if selected_teachers_mask[k]]
-                #selected_teachers = [teachers_per_client[k] for k in range(len(teachers_per_client)) ]
-                teachers[i] = selected_teachers
-            """
-        
-        return teachers  
-    
-    def save(self,metrics,path):
+        Args:
+            metrics: Metric dictionary to store with the checkpoint.
+            path: Destination checkpoint path.
+        """
         result_to_save = {
             'model_params': self.model.state_dict(),
             'metrics': metrics
         }
         torch.save(result_to_save, path)
-    
-    def step(self,**kwargs):
+
+    def _build_client_problem(self, client_idx, local_teacher_models):
+        """Build one client's local problem for the current server round.
+
+        Every client starts from scratch. Its performance reference ``p*`` is
+        initialized by the first validation evaluation and can only increase.
+        """
+        current_problem = copy.deepcopy(self.problem)
+        current_problem['performance_step'] = self.performance_step
+        current_problem['aggregation_teachers_list'] = copy.deepcopy(
+            local_teacher_models)
+        return current_problem
+
+    def step(self, **kwargs):
+        """
+        Execute one global FedFairLab round.
+
+        The round samples a teacher from history, launches client local updates,
+        distills the ensemble target into a new global model, updates global
+        history, logs metrics, and applies server callbacks.
+
+        Args:
+            **kwargs: Optional round metadata.
+        """
         handlers = []
         results = []
-        #teachers = self.select_new_teachers(global_score=self.global_score,
-        #                                    global_model_idx=self.global_model_idx)
+        selected_indices, selected_clients = self._select_clients(
+            fraction=self.fraction)
+        is_first_round = self.first_round
+        teacher_model_params, _ = self.sample_teacher_from_history()
+        teacher_sampling_diagnostics = copy.deepcopy(
+            self._last_teacher_sampling_diagnostics)
+        local_teacher_models = [] if is_first_round else [
+            copy.deepcopy(teacher_model_params)]
 
-        selected_clients = self._select_clients(fraction=self.fraction)
-        for i,client in enumerate(selected_clients):
-            
-            #if len(self.problem['aggregation_teachers_list']) >0:
-                #problem['aggregation_teachers_list'] = [copy.deepcopy(self.model.state_dict())]+teachers[i]  
-                #print(f'[SERVER] Client {i} teachers:',len(problem['aggregation_teachers_list']))
-                #assert len(problem['aggregation_teachers_list']) == len(teachers[i]) + 1, f"Teachers list length mismatch: {len(problem['aggregation_teachers_list'])} != {len(teachers[i]) + 1}"
-            #else:
-            #    problem['aggregation_teachers_list'] = []
-                #print('NO TEACHERS')
-            #if self.global_model is not None:
-            #    problem['aggregation_teachers_list'] = [copy.deepcopy(self.global_model.state_dict())]
-            current_problem = copy.deepcopy(self.problem)
-            """
-            if i in [0,1,3]:
-                for idx,constraint in enumerate(current_problem['inequality_constraints']):
-                    if self.performance_constraint < 1.0:
-                        if idx > 0:
-                            constraint.set_lower_bound(0.2)
-                            #print('Lower bound:',constraint.lower_bound)
-            
-            elif i in [2,4,5]:
-                for idx,constraint in enumerate(current_problem['inequality_constraints']):
-                    if self.performance_constraint < 1.0:
-                        if idx > 0:
-                            constraint.set_lower_bound(0.1)
-                            #print('Lower bound:',constraint.lower_bound)
-            """
-            if not self.first_round:
-                
-                current_problem['aggregation_teachers_list'] = [copy.deepcopy(g['params']) for g in self.history_global] 
-                #if len(current_problem['aggregation_teachers_list']) == 1 and not self.current_global_model_in_history:
-                #    print('Current global model is not in history, adding it to the aggregation teachers list')
-                #    current_problem['aggregation_teachers_list'].append(copy.deepcopy(self.history_global[0]['params']))
-                
-                handlers.append(getattr(client,'fit').remote(model_params=copy.deepcopy(self.history[i]),
-                           problem=current_problem,selected_clients=selected_clients,))
-            else:
-                handlers.append(getattr(client,'fit').remote(model_params=copy.deepcopy(self.model.state_dict()),
-                            problem=current_problem,selected_clients=selected_clients,))
-        self.first_round = False     
+        for client_idx, client in zip(selected_indices, selected_clients):
+            current_problem = self._build_client_problem(
+                client_idx, local_teacher_models)
+            handlers.append(client.fit.remote(
+                model_params=copy.deepcopy(
+                    self.client_model_params[client_idx]),
+                problem=current_problem,
+                selected_clients=selected_clients,
+            ))
+        self.first_round = False
         for handler in handlers:
             results.append(ray.get(handler))
-        self.history = [r['params'] for r in results]
-       
-        #results = self._broadcast_fn('fit',
-        #                   model_params=copy.deepcopy(self.model.state_dict()),
-        #                   problem=self.problem)
-        #self.model.load_state_dict(results[0]['params'])
-        #global_model = copy.deepcopy(self.model)
-        #new_params = self.aggregator(model=global_model,
-        #                params=results)
-        
-        #aggregated_model_params = self.aggregator(model=self.model,
-        #               params=results)
-        #self.model.load_state_dict(aggregated_model_params)
-        #global_eval = self.evaluate(model_params=self.model.state_dict())
-        #print('Global Score:',(1-global_eval['metrics']['val_global_score'])*100)
-        aggregated_model_params,global_eval = self.aggregation_phase(aggregation_epochs=1,
-                                                           params=results,
-                                                           selected_clients=selected_clients)
-        
-        
-        #new_params,best_model_params,global_score,global_model_idx = self.greedy_aggregator_list(params=results)
-        #self.global_score = global_score
-        #self.global_model_idx = global_model_idx
-        #self.problem['aggregation_teachers_list'] = [res['params'] for res in results]
+        for client_idx, result in zip(selected_indices, results):
+            self.client_model_params[client_idx] = copy.deepcopy(
+                result['params'])
+
+        aggregated_model_params, global_eval = self.aggregation_phase(
+            params=results,
+            selected_clients=selected_clients,
+            teacher_model_params=teacher_model_params,
+        )
+        global_eval['metrics'].update(teacher_sampling_diagnostics)
+
         self.model.load_state_dict(aggregated_model_params)
-        global_score = global_eval['metrics']['val_global_score']
-        if len(self.history_global) > 0:
-            if global_score > torch.tensor([h['score'] for h in self.history_global]).min().item():
-                self.current_global_model_in_history = True
-            else: 
-                self.current_global_model_in_history = False
-        self.history_global.append({'params':aggregated_model_params,
-                                    'score':(global_eval['metrics']['val_global_score']),
-                                    })
-        
-        self.history_global.sort(key=lambda x: x['score'],reverse=True)
-        #print('History global:',[s['score'] for s in self.history_global])
-        self.history_global = self.history_global[:1]
-        #global_eval = self.evaluate(model_params=self.model.state_dict())
-         
+        self.update_global_history(aggregated_model_params, global_eval)
+
         try:
             for callback in self.callbacks:
                 if isinstance(callback, EarlyStopping):
-                    stop,counter = callback(metrics=global_eval['metrics'])
+                    stop, counter = callback(metrics=global_eval['metrics'])
                     global_eval['metrics']['global_early_stopping'] = counter
                     if stop:
-                        self.logger.log(global_eval['metrics'])  
-                        raise EarlyStoppingException  
-                elif isinstance(callback,ModelCheckpoint):
+                        self.logger.log(global_eval['metrics'])
+                        raise EarlyStoppingException
+                elif isinstance(callback, ModelCheckpoint):
                     model_checkpoint = callback(save_fn=partial(self.save,
-                                                              global_eval['metrics']),
-                                                metrics = global_eval['metrics']
+                                                                global_eval['metrics']),
+                                                metrics=global_eval['metrics']
                                                 )
-                            
+
                     global_eval['metrics']['global_checkpoint'] = 1 if model_checkpoint else 0
                     self.global_model = copy.deepcopy(self.model)
             self.logger.log(global_eval['metrics'])
-            #self.model.load_state_dict(new_params)
-        
-        except EarlyStoppingException:
-            raise EarlyStoppingException 
+            # self.model.load_state_dict(new_params)
 
-    def personalization_phase(self,**kwargs):
-        #print('Personalization phase')
-        #print('Checkpoint path:',self.checkpoint_path)
-        handlers = []
+        except EarlyStoppingException:
+            raise EarlyStoppingException
+
+    def log_final_results(self, split='test', **kwargs):
+        """
+        Log final global checkpoint metrics and upload the global model artifact.
+
+        Args:
+            **kwargs: Reserved for future logging options.
+        """
+        best_results = None
+        artifact_path = None
         for callback in self.callbacks:
-          if isinstance(callback, ModelCheckpoint):
-            best_results = callback.get_best_model()  
-        global_model_params = best_results['model_params']
-        current_problem = copy.deepcopy(self.problem)
-        current_problem['aggregation_teachers_list'] = [h['params'] for h in self.history_global]
-        self._broadcast_fn('personalize',
-                           model_params=global_model_params,
-                           problem=current_problem,
-                           first_performance_constraint=self.performance_constraint<1.0,
-                           performance_constraint=self.performance_constraint,
-                           original_threshold_list=self.original_threshold_list)
-        
-        return          
-    
-    def log_final_results(self,**kwargs):
-        for callback in self.callbacks:
-          if isinstance(callback, ModelCheckpoint):
-            best_results = callback.get_best_model() 
-            artifact_name = 'global_model'
-            artifact_path = callback.get_model_path()
-            self.logger.log_artifact(artifact_name,
-                                     artifact_path)
-             
-        metrics = best_results['metrics']
-        final_scores = {}
-        for key,v in metrics.items():
-            final_scores[f'final_{key}'] = v
+            if isinstance(callback, ModelCheckpoint):
+                best_results = callback.get_best_model()
+                artifact_name = 'global_model'
+                artifact_path = callback.get_model_path()
+                self.logger.log_artifact(artifact_name,
+                                         artifact_path)
+
+        if best_results is None:
+            raise ValueError("Best global checkpoint not found")
+
+        if split == 'val':
+            metric_prefix = kwargs.get('metric_prefix', 'final')
+            final_scores = {
+                f'{metric_prefix}_{key}': value
+                for key, value in best_results['metrics'].items()
+            }
+        elif split == 'test':
+            model_params = best_results.get('model_params', best_results)
+            test_results = self.evaluate(
+                model_params=model_params,
+                split='test',
+                log_results=False,
+            )
+            final_scores = {
+                f'final_{key}': value
+                for key, value in test_results['metrics'].items()
+            }
+        else:
+            raise ValueError(f"Unsupported final split: {split}")
         self.logger.log(final_scores)
-    
-    
-    def execute(self,**kwargs):
-        
+
+    def execute(self, **kwargs):
+        """
+        Run full server training.
+
+        Initializes the global history with the starting model and executes
+        federated rounds until the iteration budget or early stopping.
+
+        Args:
+            **kwargs: Optional execution controls.
+        """
+
         self.first_round = True
-        global_eval = self.evaluate(model_params=self.model.state_dict())
-        
+        global_eval = self.evaluate(
+            model_params=self.model.state_dict(),
+            update_performance_reference=True,
+        )
+
         for callback in self.callbacks:
             if isinstance(callback, EarlyStopping):
-                stop,counter = callback(metrics=global_eval['metrics'])
+                stop, counter = callback(metrics=global_eval['metrics'])
                 global_eval['metrics']['global_early_stopping'] = counter
                 if stop:
-                    self.logger.log(global_eval)  
-                    raise EarlyStoppingException  
-            elif isinstance(callback,ModelCheckpoint):
+                    self.logger.log(global_eval)
+                    raise EarlyStoppingException
+            elif isinstance(callback, ModelCheckpoint):
                 model_checkpoint = callback(save_fn=partial(self.save,
-                                                              global_eval['metrics']),
-                                                metrics = global_eval['metrics']
-                                                )
+                                                            global_eval['metrics']),
+                                            metrics=global_eval['metrics']
+                                            )
                 global_eval['metrics']['global_checkpoint'] = 1 if model_checkpoint else 0
-        
+
         self.logger.log(global_eval['metrics'])
-        
+
         try:
-            pbar = tqdm(range(self.num_federated_iterations), desc="Global rounds", unit="round")
+            pbar = tqdm(
+                range(self.num_federated_iterations),
+                desc="Global rounds",
+                unit="round",
+                disable=not self.verbose,
+            )
             for i in pbar:
                 pbar.set_postfix_str(f"Global Round {i+1}")
                 self.step(round=i)
         except EarlyStoppingException:
             pass
-        print('End of the global rounds')
-        print('Starting the personalization phase')
-        self.personalization_phase()
-        print('End of the personalization phase')
+        debug_print('End of the global rounds')
 
-    def evaluate_model_from_ckpt(self,**kwargs):
+    def evaluate_model_from_ckpt(self, **kwargs):
+        """
+        Evaluate a model checkpoint globally or on one client.
+
+        Args:
+            **kwargs: Requires ``checkpoint_path``. Optional ``client_id``
+                restricts evaluation to a single client. ``split`` defaults to
+                ``test``.
+
+        Returns:
+            Dictionary of final-prefixed metric values.
+        """
         checkpoint_path = kwargs.get('checkpoint_path')
         client_id = kwargs.get('client_id')
+        split = kwargs.get('split', 'test')
         assert checkpoint_path is not None, "Checkpoint Path is required"
-        
 
-        model_params = torch.load(checkpoint_path)
-       
+        model_params = load_trusted_checkpoint(checkpoint_path)
+
         if client_id is None:
             try:
                 self.model.load_state_dict(model_params['model_params'])
@@ -978,31 +1292,68 @@ class ServerFedFairLab(BaseServer):
             except KeyError:
                 self.model.load_state_dict(model_params)
 
-        print('Evaluating model from checkpoint:',checkpoint_path)
-       
+        debug_print('Evaluating model from checkpoint:', checkpoint_path)
+
         global_scores = self.evaluate(model_params=self.model.state_dict(),
-                                      client_id=client_id)
+                                      client_id=client_id,
+                                      split=split,
+                                      log_results=False)
         final_scores = {}
-        for key,v in global_scores['metrics'].items():
-                final_scores[f'final_{key}'] = v
-        #print('Final scores:',final_scores)
+        for key, v in global_scores['metrics'].items():
+            final_scores[f'final_{key}'] = v
+        # print('Final scores:',final_scores)
         return final_scores
-    
-    
-    def fine_tune(self,**kwargs):
+
+    def evaluate_saved_checkpoints_on_test(self):
+        """Evaluate the saved best global checkpoint without running training."""
+        if not os.path.exists(self.checkpoint_path):
+            raise FileNotFoundError(
+                f"Global checkpoint not found: {self.checkpoint_path}")
+
+        final_scores = self.evaluate_model_from_ckpt(
+            checkpoint_path=self.checkpoint_path,
+            split='test',
+        )
+        self.logger.log(final_scores)
+        self.logger.log_artifact('global_model', self.checkpoint_path)
+        return final_scores
+
+    def fine_tune(self, **kwargs):
+        """
+        Broadcast optional fine-tuning using the saved global checkpoint.
+
+        Args:
+            **kwargs: Reserved fine-tuning options.
+        """
         handlers = []
         if os.path.exists(self.checkpoint_path):
-            global_model = torch.load(self.checkpoint_path)
-            self.model.load_state_dict(global_model)
-        
-        self._broadcast_fn('fine_tune',global_model=self.model)
+            global_model = load_trusted_checkpoint(self.checkpoint_path)
+            self.model.load_state_dict(
+                global_model.get('model_params', global_model)
+            )
+
+        self._broadcast_fn('fine_tune', global_model=self.model)
         return
-    
-    def shutdown(self,**kwargs):
-        log_results = kwargs.get('log_results',True)
-        if log_results:
-            self.log_final_results()
-        
+
+    def shutdown(self, **kwargs):
+        """
+        Close server and client resources.
+
+        Args:
+            **kwargs: ``log_results`` controls final global logging.
+        """
+        log_results = kwargs.get('log_results', True)
+        log_global_results = kwargs.get('log_global_results', log_results)
+        log_client_results = kwargs.get('log_client_results', log_results)
+        final_split = kwargs.get('final_split', 'test')
+        if log_global_results:
+            self.log_final_results(
+                split=final_split,
+                metric_prefix=kwargs.get('metric_prefix', 'final'),
+            )
+
         self.logger.close()
         self._broadcast_fn('shutdown',
-                           log_results=log_results)
+                           log_results=log_client_results,
+                           final_split=final_split,
+                           metric_prefix=kwargs.get('metric_prefix', 'final'))

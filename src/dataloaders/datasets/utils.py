@@ -1,5 +1,11 @@
 import numpy as np
 def find_bucket(n,thresholds):
+    """Handle find bucket.
+    
+    Args:
+        n: Number of items to partition.
+        thresholds: Threshold values that define the intervals.
+    """
     for i in range(len(thresholds)-1):
         if n>=thresholds[i] and n<=thresholds[i+1]:
             return i
@@ -9,6 +15,13 @@ def find_bucket(n,thresholds):
 
 def _assign(x,sensitive_dict,key):
     
+    """Handle assign.
+    
+    Args:
+        x: Input row or value to inspect.
+        sensitive_dict: Sensitive-attribute metadata dictionary.
+        key: Label tensor or array.
+    """
     if x in sensitive_dict[key]:
         return x
     else:
@@ -37,6 +50,14 @@ def assign_group_id(df, sensitive_attributes):
         }
 
         def get_combination_id(row):
+            """Return combination id.
+            
+            Args:
+                row: Dataframe row being transformed.
+            
+            Returns:
+                Requested result.
+            """
             row_tuple = tuple(row[col] for col in columns)
             return combination_ids.get(row_tuple, -1)  # -1 se non trovata
 
@@ -49,6 +70,13 @@ def assign_group_id(df, sensitive_attributes):
 
 
 def assign_group_id_old(data,sensitive_dict,group_name):
+    """Handle assign group id old.
+    
+    Args:
+        data: Input data or dataframe.
+        sensitive_dict: Sensitive-attribute metadata dictionary.
+        group_name: Name of the sensitive/group attribute.
+    """
     if len(sensitive_dict.keys()) == 0:
         data[f'group_id_{group_name}'] = data.apply(lambda x: -1, axis=1)
         return data

@@ -1,6 +1,13 @@
 import torch
 
 def _binary_class_demographic_parity(probabilities, group_masks, group_ids):
+    """Handle binary class demographic parity.
+    
+    Args:
+        probabilities: Predicted class probabilities or soft assignments.
+        group_masks: Group-membership masks indexed by sensitive attribute.
+        group_ids: Identifiers of the groups involved in the computation.
+    """
     available_groups = torch.unique(group_masks)
     
     # Escludi il calcolo se uno dei gruppi target non è presente
@@ -16,6 +23,12 @@ def _binary_class_demographic_parity(probabilities, group_masks, group_ids):
 
    
 def demographic_parity(probabilities, **kwargs):
+    """Handle demographic parity.
+    
+    Args:
+        probabilities: Predicted class probabilities or soft assignments.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     group_masks = kwargs.get('group_masks')
     group_ids = kwargs.get('target_groups')
     target_class = kwargs.get('target_class')
@@ -24,6 +37,14 @@ def demographic_parity(probabilities, **kwargs):
 
 def _binary_class_equal_opportunity(probabilities,labels_mask,group_masks,group_ids):
     
+    """Handle binary class equal opportunity.
+    
+    Args:
+        probabilities: Predicted class probabilities or soft assignments.
+        labels_mask: Boolean mask selecting labels relevant to the metric.
+        group_masks: Group-membership masks indexed by sensitive attribute.
+        group_ids: Identifiers of the groups involved in the computation.
+    """
     available_groups = torch.unique(group_masks)
     #print(f'[SURROGATE] Available groups: {available_groups}, Group IDs: {group_ids}')
     # Escludi il calcolo se uno dei gruppi target non è presente
@@ -41,6 +62,12 @@ def _binary_class_equal_opportunity(probabilities,labels_mask,group_masks,group_
         return torch.abs(eo)
     
 def equal_opportunity(probabilities,**kwargs):
+    """Handle equal opportunity.
+    
+    Args:
+        probabilities: Predicted class probabilities or soft assignments.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     group_masks = kwargs.get('group_masks')
     group_ids = kwargs.get('target_groups')
     labels = kwargs.get('labels')
@@ -61,6 +88,12 @@ def equal_opportunity(probabilities,**kwargs):
     
 
 def predictive_equality(probabilities,**kwargs):
+    """Predict labels ive equality.
+    
+    Args:
+        probabilities: Predicted class probabilities or soft assignments.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     group_masks = kwargs.get('group_masks')
     group_ids = kwargs.get('target_groups')
     labels = kwargs.get('labels')
@@ -78,6 +111,12 @@ def predictive_equality(probabilities,**kwargs):
        
 def equalized_odds(probabilities,**kwargs):
     
+    """Handle equalized odds.
+    
+    Args:
+        probabilities: Predicted class probabilities or soft assignments.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     eo = equal_opportunity(probabilities,**kwargs)
     pe = predictive_equality(probabilities,**kwargs)
     #print(f'[INFO] Equalized Odds: {eo}, Predictive Equality: {pe}')

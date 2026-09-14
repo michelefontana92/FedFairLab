@@ -1,14 +1,34 @@
 _METRICS={}
 
 def register_metric(metric_name):
+    """Register metric.
+    
+    Args:
+        metric_name: Registered object name.
+    """
     def decorator(fn):
+        """Register the decorated class or function and return it unchanged.
+        
+        Args:
+            fn: Callable or class being registered.
+        """
         _METRICS[metric_name] = fn
         return fn
     return decorator
 
 class MetricsFactory:
+    """Factory for constructing registered metric objects."""
     @staticmethod
     def create_metric(metric_name, **kwargs):
+        """Create metric.
+        
+        Args:
+            metric_name: Registered object name.
+            **kwargs: Additional options forwarded to the implementation.
+        
+        Returns:
+            Requested result.
+        """
         if metric_name not in _METRICS:
             raise ValueError(f"Unknown metric: {metric_name}")
         return _METRICS[metric_name](**kwargs)

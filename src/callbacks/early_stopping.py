@@ -15,6 +15,14 @@ class EarlyStopping:
     """
     def __init__(self, patience=5, delta=0.0,
                  monitor='val_loss', mode='min'):
+        """Initialize the object.
+        
+        Args:
+            patience: Number of non-improving checks before stopping.
+            delta: Minimum improvement or distance margin.
+            monitor: Metric name monitored by the callback.
+            mode: Optimization direction for the monitored metric.
+        """
         self.patience = patience
         self.delta = delta
         self.monitor = monitor
@@ -24,6 +32,11 @@ class EarlyStopping:
         self.early_stop = False
 
     def __call__(self, **kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         metrics = kwargs.get('metrics')
         assert metrics is not None, "Metrics are required for EarlyStopping"
         assert isinstance(metrics, dict), "Logs must be a dictionary"
@@ -39,6 +52,11 @@ class EarlyStopping:
         return self.early_stop,self.counter
 
     def reset(self,keep_best=False):
+        """Reset.
+        
+        Args:
+            keep_best: Whether to restore the best checkpoint after training.
+        """
         self.counter = 0
         self.early_stop = False
         if keep_best:

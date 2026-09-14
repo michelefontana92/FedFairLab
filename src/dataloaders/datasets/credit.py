@@ -24,6 +24,11 @@ class CreditDataset(BaseDataset):
     """
 
     def __init__(self,**kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super(CreditDataset, self).__init__(**kwargs)
         self.root = kwargs.get('root', 'data/Credit')
         data_name = kwargs['filename']

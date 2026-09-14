@@ -6,9 +6,15 @@ from .base_dataset import BaseDataset
 @register_dataset('education')
 class EducationDataset(BaseDataset):
 
+    """Implementation of EducationDataset."""
     def __init__(self,**kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super(EducationDataset, self).__init__(**kwargs)
-        self.root = kwargs.get('root', 'data/Education')
+        self.root = kwargs.get('root', 'data/10_Clients/Education')
         data_name = kwargs['filename']
 
         self.data_path = os.path.join(self.root, data_name)
@@ -28,6 +34,7 @@ class EducationDataset(BaseDataset):
                          'DREM','COW']
         self.num_cols = ['AGEP','PINCP','WKHP','OCCP','POBP']
         self.labels = [0,1,2,3]
-        self.clean_data_path = os.path.join(self.root,'education_clean.csv')
+        self.clean_data_path = kwargs.get(
+            'clean_data_path', os.path.join(self.root, 'education_clean.csv'))
         self.setup()
         

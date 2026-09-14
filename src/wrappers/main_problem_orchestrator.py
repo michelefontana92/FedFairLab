@@ -1,3 +1,4 @@
+from debug_utils import debug_print
 import math
 import random
 import torch
@@ -7,12 +8,16 @@ from dataclasses import dataclass
 import os
 from loggers import WandbLogger
 from .subproblem_config import SubProblemConfig
+from checkpoint_utils import load_trusted_checkpoint
 
 @dataclass
 class MainProblemOrchestrator:
     """
-    This class handles the logic of the orchestrator. It is responsible for selecting the learners,
-    assigning the constraints to the learners, and updating the model.
+    Coordinate FairLAB local learners for one client.
+
+    The orchestrator partitions fairness constraints into subproblems, selects
+    which local learner to update, manages ALM state, queries teacher models or
+    precomputed teacher logits, and tracks the best local model.
     """
     model : torch.nn.Module
     inequality_constraints: list
@@ -37,6 +42,12 @@ class MainProblemOrchestrator:
 
     # Save the model to the specified path. The path should include the file name and extension.
     def save(self, path):
+        """
+        Save the current orchestrator model state.
+
+        Args:
+            path: Destination checkpoint path.
+        """
         save_dict = {'model_state_dict': copy.deepcopy(self.model.state_dict()),
                      'inequality_lambdas': {},
                      'equality_lambdas': {}}
@@ -45,45 +56,169 @@ class MainProblemOrchestrator:
         torch.save(save_dict, path)
 
     def set_state(self,state):
+       """
+       Placeholder for restoring serialized orchestrator state.
+
+       Args:
+           state: Serialized state dictionary.
+       """
        pass
     
     # Load the model from the specified path. The path should include the file name and extension.
     def load(self, path):
-        save_dict = torch.load(path)
+        """
+        Load a saved orchestrator model state.
+
+        Args:
+            path: Checkpoint path.
+
+        Returns:
+            Loaded checkpoint dictionary.
+        """
+        save_dict = load_trusted_checkpoint(path)
         self.model.load_state_dict(save_dict['model_state_dict'])
         
         return save_dict
     
     def __post_init__(self):
+        """
+        Complete dataclass initialization.
+
+        Builds constraint assignments, evaluation subproblems, teacher caches and
+        local subproblems required for subsequent iterations.
+        """
         self.constraints_assignment = {
             'inequality_constraints': [],
             'equality_constraints': [],
         }
-    
+
         self.split_problem = True
-        self.assign_constraints()
-        self.instanciate_subproblems(full_instance=True)
-        
-        self.active_groups = None
         self.violations_dict = None
         self.teacher_history = []
+        self.performance_budget = self.options.get('performance_budget')
+        self.performance_step = self.options.get('performance_step', 0.0)
+        self.performance_reference = None
         self.c = 10
         self.current_model_idx = -1
         self.shock = False
         self.empty_state = True
-        self.wasserstein_teachers_list = []
+        self.aggregation_teacher_logits = None
+
+        self.unconstrained_mode = (
+            len(self.inequality_constraints) == 0
+            and len(self.equality_constraints) == 0
+        )
+        if self.unconstrained_mode:
+            self.num_subproblems = 0
+            self.instanciate_subproblems(full_instance=True)
+            self.query_teachers()
+            self.eval_subproblem.instance.set_teachers_kwargs(self.teachers_kwargs)
+            return
+
+        self.assign_constraints()
+        self.instanciate_subproblems(full_instance=True)
         self.query_teachers()
-        self.query_wasserstein_teachers()
         self.eval_subproblem.instance.set_teachers_kwargs(self.teachers_kwargs)
-        if len(self.inequality_constraints) == 0:
-            self.num_subproblems = 1
-            self.constraints_assignment['inequality_constraints'] = self._unique_assignment()
-            self.instanciate_subproblems(full_instance=False)
 
         #print('After init Teachers kwargs:',self.teachers_kwargs)  
         #print('Main Problem Orchestrator initialized')
+
+    def has_performance_budget(self):
+        """
+        Check whether FairLAB dynamic performance constraints are enabled.
+
+        Returns:
+            ``True`` when beta was provided and the first shared
+            macro-constraint contains the two performance constraints used by
+            FairLAB.
+        """
+        return (
+            self.performance_budget is not None
+            and len(self.inequality_constraints) >= 2
+            and len(self.macro_constraints) > 0
+            and self.macro_constraints[0][:2] == [0, 1]
+        )
+
+    def compute_performance_value(self, model):
+        """
+        Evaluate the predictive performance metric ``P`` on validation data.
+
+        Args:
+            model: Model whose parameters are evaluated.
+
+        Returns:
+            Floating-point value of the original performance objective, typically
+            F1 in this codebase.
+        """
+        val_kwargs = self.eval_subproblem.instance.compute_val_kwargs(
+            model.state_dict(),
+            use_training=False,
+        )
+        performance = self.eval_subproblem.instance.original_objective_fn(**val_kwargs)
+        return float(performance.detach().cpu().item())
+
+    def update_performance_reference(self, model):
+        """
+        Update FairLAB's ``p*`` with the best validation performance seen so far.
+
+        Args:
+            model: Candidate model used to refresh the reference.
+
+        Returns:
+            Updated reference performance.
+        """
+        if not self.has_performance_budget():
+            return None
+        current_performance = self.compute_performance_value(model)
+        if self.performance_reference is None:
+            self.performance_reference = current_performance
+        else:
+            self.performance_reference = max(self.performance_reference, current_performance)
+        return self.performance_reference
+
+    def update_performance_constraints(self, model):
+        """
+        Rebuild FairLAB performance constraints from the current ``p*``.
+
+        The budget constraint enforces ``P(m) >= p* - beta``. The improvement
+        constraint seeks
+        ``P(m) >= p* + rho_step`` and follows the same lifecycle as the budget
+        constraint. The reference ``p*`` is initialized and updated from
+        validation performance.
+
+        Args:
+            model: Current model at the beginning of the FairLAB iteration.
+        """
+        if not self.has_performance_budget():
+            return
+        p_star = self.update_performance_reference(model)
+        improvement_target = min(1.0, p_star + self.performance_step)
+        budget_target = max(0.0, p_star - self.performance_budget)
+        self.inequality_constraints[0].upper_bound = improvement_target
+        self.inequality_constraints[1].upper_bound = budget_target
+        for subproblem in getattr(self, 'subproblems', {}).values():
+            if len(subproblem.current_inequality_constraints) >= 2:
+                subproblem.current_inequality_constraints[0].upper_bound = improvement_target
+                subproblem.current_inequality_constraints[1].upper_bound = budget_target
+            if hasattr(subproblem, 'instance') and len(subproblem.instance.inequality_constraints_fn_list) >= 2:
+                subproblem.instance.inequality_constraints_fn_list[0].upper_bound = improvement_target
+                subproblem.instance.inequality_constraints_fn_list[1].upper_bound = budget_target
+        if hasattr(self, 'eval_subproblem'):
+            self.eval_subproblem.current_inequality_constraints[0].upper_bound = improvement_target
+            self.eval_subproblem.current_inequality_constraints[1].upper_bound = budget_target
+            if hasattr(self.eval_subproblem, 'instance'):
+                self.eval_subproblem.instance.inequality_constraints_fn_list[0].upper_bound = improvement_target
+                self.eval_subproblem.instance.inequality_constraints_fn_list[1].upper_bound = budget_target
      
     def update_teacher_history(self,teacher_model,metric,violations_dict):
+        """
+        Store a teacher snapshot with its score and constraint violations.
+
+        Args:
+            teacher_model: Model to archive.
+            metric: Selection metric associated with the teacher.
+            violations_dict: Constraint violation summary for the teacher.
+        """
         config = {
             'model': copy.deepcopy(teacher_model.state_dict()),
             'metric': metric,
@@ -98,6 +233,13 @@ class MainProblemOrchestrator:
             self.teacher_history = self.teacher_history[-max_num_teachers:]
 
     def select_teacher_model(self):
+        """
+        Select a teacher index from the local teacher history.
+
+        Returns:
+            Index of the selected teacher. The current implementation returns the
+            most recent teacher for deterministic local behavior.
+        """
   
         metrics = torch.tensor([config['metric'] for i,config in enumerate(self.teacher_history)])
         tau=0.5
@@ -107,36 +249,19 @@ class MainProblemOrchestrator:
         return selected
     
     def reset(self):
+        """Reset callbacks and clear local teacher history before a new fit."""
         for checkpoint in self.checkpoints:
             checkpoint.reset()
         self.teacher_history = []
 
-    def compute_active_groups(self,selected_teacher_idx):
-        tolerance = 0.05
-        active_groups = {}
-        
-        violations_dict = self.teacher_history[selected_teacher_idx]['violations_per_group']
-        
-        for group_name, violations in violations_dict.items():
-            active_groups[group_name] = []
-            for idx,violation in violations.items():
-                if violation <= tolerance:
-                    
-                        
-                    active_groups[group_name].append({
-                            'group_id': idx,
-                            'delta': self.delta
-                     })
-                   
-        active_groups_cpy = copy.deepcopy(active_groups)
-        for group_name,group_list in active_groups_cpy.items():
-            if len(group_list) == 0:
-                del active_groups[group_name]
-
-        self.active_groups = copy.deepcopy(active_groups) 
-
-
     def instanciate_subproblems(self,full_instance=True):
+        """
+        Instantiate evaluation or trainable subproblems.
+
+        Args:
+            full_instance: If true, create only the full evaluation problem;
+                otherwise create local learner and violation subproblems.
+        """
         if full_instance:
             self.eval_subproblem = self.build_subproblem(-1,eval_problem=True)
             self.eval_subproblem.instanciate(self.model)
@@ -153,37 +278,69 @@ class MainProblemOrchestrator:
  
         
     def query_teachers(self):
+        """
+        Populate cached teacher tensors for train and validation data.
+
+        If ``aggregation_teacher_logits`` is set, it is used directly as the
+        distillation target for the aggregation phase.
+        """
         self.teachers_kwargs = {'train':{},'val':{}}
-        print(f'Querying {len(self.aggregation_teachers_list)} teachers')
+        if self.aggregation_teacher_logits is not None:
+            self.eval_subproblem.instance.set_ensemble_teacher_logits(self.aggregation_teacher_logits)
+            self.teachers_kwargs['train'] = copy.deepcopy(self.eval_subproblem.instance.teachers_kwargs['train'])
+            self.teachers_kwargs['val'] = copy.deepcopy(self.eval_subproblem.instance.teachers_kwargs['val'])
+            return
+        debug_print(f'Querying {len(self.aggregation_teachers_list)} teachers')
         train_kwargs = self.eval_subproblem.instance.query_teachers(self.aggregation_teachers_list,use_training=True)
         val_kwargs = self.eval_subproblem.instance.query_teachers(self.aggregation_teachers_list,use_training=False)
         self.teachers_kwargs['train'] = train_kwargs
         self.teachers_kwargs['val'] = val_kwargs
 
-    def query_wasserstein_teachers(self):
-        self.wasserstein_teachers_kwargs = {'train':{},'val':{}}
-        train_kwargs = self.eval_subproblem.instance.query_teachers(self.wasserstein_teachers_list,use_training=True)
-        val_kwargs = self.eval_subproblem.instance.query_teachers(self.wasserstein_teachers_list,use_training=False)
-        self.wasserstein_teachers_kwargs['train'] = train_kwargs
-        self.wasserstein_teachers_kwargs['val'] = val_kwargs
+    def compute_weighted_ensemble_logits(self, teacher_model_dict_list, weights, use_training=True):
+        """
+        Compute weighted ensemble logits through the evaluation local learner.
 
+        Args:
+            teacher_model_dict_list: Candidate model state dicts.
+            weights: Ensemble weights supplied by the server.
+            use_training: Whether to use the training split.
+
+        Returns:
+            Tensor of weighted local logits.
+        """
+        return self.eval_subproblem.instance.compute_weighted_ensemble_logits(
+            teacher_model_dict_list=teacher_model_dict_list,
+            weights=weights,
+            use_training=use_training,
+        )
 
     def iterate_without_constraints(self,num_local_epochs,send_teacher_model=False,state=None,aggregation_weights=None):
-        print('Using iterate_without_constraints')
-        problem = self.subproblems[0]
-        problem.instance.reset()
-        #print('Current model state:',self.model.state_dict()['fc1.weight'][:5,:])
+        """
+        Train the model when no fairness constraints are active.
+
+        Args:
+            num_local_epochs: Number of epochs for the local learner.
+            send_teacher_model: Compatibility flag for teacher transmission.
+            state: Optional persisted local state.
+            aggregation_weights: Optional distillation surrogate weights.
+
+        Returns:
+            Updated model state and an empty state dictionary.
+        """
+        debug_print('Using iterate_without_constraints')
+        learner = self.eval_subproblem.instance
+        learner.reset()
         
         self.query_teachers()
-        problem.instance.set_teachers_kwargs(self.teachers_kwargs)
+        learner.set_teachers_kwargs(self.teachers_kwargs)
         
         if aggregation_weights is not None:
             #print('Setting aggregation weights:',aggregation_weights)
-            problem.instance.batch_objective_function.set_weights(aggregation_weights)
-            problem.instance.objective_fn.set_weights(aggregation_weights)
-            problem.instance.original_objective_fn.set_weights(aggregation_weights)
+            learner.batch_objective_function.set_weights(aggregation_weights)
+            learner.objective_fn.set_weights(aggregation_weights)
+            learner.original_objective_fn.set_weights(aggregation_weights)
         
-        updated_model, _, _ = problem.instance.fit(
+        updated_model, _, _ = learner.fit(
             start_model_dict=self.model.state_dict(),
             num_epochs=num_local_epochs,
             disable_log=True  
@@ -211,6 +368,19 @@ class MainProblemOrchestrator:
     def iterate(self,num_local_epochs=1,add_proximity_constraints=True,
                 send_teacher_model=False,
                 state=None,aggregation_weights=None):
+        """
+        Run one FairLAB local orchestration step.
+
+        Args:
+            num_local_epochs: Epochs for the selected learner.
+            add_proximity_constraints: Whether proximity constraints may be used.
+            send_teacher_model: Compatibility flag for teacher transmission.
+            state: Persisted ALM state from previous rounds.
+            aggregation_weights: Optional aggregation/distillation weights.
+
+        Returns:
+            Dictionary containing updated model parameters and local state.
+        """
         #print('[BEFORE ITERATE] Number of subproblems:',self.num_subproblems)
         
         
@@ -219,6 +389,10 @@ class MainProblemOrchestrator:
                                                     send_teacher_model=send_teacher_model,
                                                     state=state,
                                                     aggregation_weights=aggregation_weights)
+
+        if state is not None and 'performance_reference' in state:
+            self.performance_reference = state['performance_reference']
+        self.update_performance_constraints(self.model)
         
         
         if self.violations_dict is None:
@@ -261,44 +435,23 @@ class MainProblemOrchestrator:
         max_violation_val = torch.max(torch.tensor([v for v in self.val_violation_per_subproblem.values()])).item()
         if self.verbose:
             if not send_teacher_model:
-                print(50*'-')
-                print(f'\nSelected subproblem {selected} with violation (train) {self.violation_per_subproblem[selected]} (val) {self.val_violation_per_subproblem[selected]}')
-                print(f'Max violation (train) {max_violation} (val) {max_violation_val}')
-                print()
-                print(50*'-')
-                print()
+                debug_print(50*'-')
+                debug_print(f'\nSelected subproblem {selected} with violation (train) {self.violation_per_subproblem[selected]} (val) {self.val_violation_per_subproblem[selected]}')
+                debug_print(f'Max violation (train) {max_violation} (val) {max_violation_val}')
+                debug_print()
+                debug_print(50*'-')
+                debug_print()
         num_epochs = num_local_epochs
         updated_state = {}
         if send_teacher_model:
-            delta = self.delta_per_subproblem[selected]
             if self.verbose:
-                print(50*'-')
-                print(f'\nSelected subproblem {selected} with delta {delta} and violation (train) {self.violation_per_subproblem[selected]} (val) {self.val_violation_per_subproblem[selected]}')
-                print(f'Max violation (train) {max_violation} (val) {max_violation_val}')
-                print()
-                print(50*'-')
-                print()
-            
-            for i in range(len(self.teacher_history)):
-                #problem.add_global_proximity_constraint(i,
-                #                                        delta,
-                #                                        i==0)
-                self.compute_active_groups(i)
-                if self.verbose:
-                    print('Active groups:',self.active_groups)
-                
-                if len(self.active_groups) > 0:
-                    is_first = True
-                    for group_name,group_list in self.active_groups.items():
-                        for group in group_list:
-                            problem.add_local_proximity_constraint(i,
-                                                                    group_name,
-                                                                    group['group_id'],
-                                                                    delta,
-                                                                    is_first)
-                            is_first = False
-            
-            
+                debug_print(50*'-')
+                debug_print(f'\nSelected subproblem {selected} with violation (train) {self.violation_per_subproblem[selected]} (val) {self.val_violation_per_subproblem[selected]}')
+                debug_print(f'Max violation (train) {max_violation} (val) {max_violation_val}')
+                debug_print()
+                debug_print(50*'-')
+                debug_print()
+
             if state is not None:
                 updated_state = copy.deepcopy(state)
                 try: 
@@ -308,21 +461,7 @@ class MainProblemOrchestrator:
                     problem.set_alm(new_inequality_lambdas=new_inequality_lambdas,
                                 new_equality_lambdas=new_equality_lambdas)
                 except KeyError:
-                    #print('No state found for subproblem',selected)
-                    #print('State:',state.keys())
                     problem.set_alm()
-            #if state is not None:
-            #    print('Problem: ',problem.instance.id)
-           #     print('Loading state: Inequality lambdas: ',state['inequality_lambdas'])
-                #self.set_state(state)
-            #print(f'Sending teacher model of {len(self.aggregation_teachers_list)} teachers')    
-            
-            self.wasserstein_teachers_list = [self.teacher_history[i]['model'] for i in range(len(self.teacher_history))]
-            
-            self.query_wasserstein_teachers()
-            
-            self.eval_subproblem.instance.set_wasserstein_teachers_kwargs(self.wasserstein_teachers_kwargs)
-            problem.instance.set_wasserstein_teachers_kwargs(self.wasserstein_teachers_kwargs)
 
             updated_model,self.inequality_lambda,self.equality_lambda = problem.instance.fit(start_model_dict = self.model.state_dict(),
                                                  num_epochs=num_epochs,
@@ -351,6 +490,7 @@ class MainProblemOrchestrator:
 
         self.model.load_state_dict(updated_model)
         metrics = self.evaluate(self.model)
+        self.update_performance_reference(self.model)
         old_violation_per_subproblem = copy.deepcopy(self.violation_per_subproblem)
         
         self.instanciate_subproblems(full_instance=False)
@@ -394,12 +534,22 @@ class MainProblemOrchestrator:
         
         updated_state.update({
             'teacher_history': self.teacher_history,
+            'performance_reference': self.performance_reference,
         })
         return {'model': copy.deepcopy(self.model.state_dict()),
                 'state': updated_state
                 }
     
     def _compute_macro_constraints_violations_subproblems(self, val_kwargs):
+        """
+        Compute maximum macro-constraint violation per subproblem.
+
+        Args:
+            val_kwargs: Validation tensors and metadata.
+
+        Returns:
+            Tensor with one violation value per subproblem.
+        """
         final_violations = []
         for i in range(self.num_subproblems):
             current_violations=self.violation_subproblems[i].instance.compute_violations(val_kwargs)
@@ -416,6 +566,15 @@ class MainProblemOrchestrator:
     
    
     def compute_violations(self,model):
+        """
+        Compute validation and training violations for a model.
+
+        Args:
+            model: Model instance to evaluate.
+
+        Returns:
+            Tuple ``(validation_violations, training_violations)``.
+        """
         self.eval_subproblem.instance.set_teachers_kwargs(self.teachers_kwargs)
         val_kwargs = self.eval_subproblem.instance.compute_val_kwargs(model.state_dict(),use_training=False)
         eval_subproblem_violations = self.eval_subproblem.instance.compute_violations(val_kwargs)
@@ -427,10 +586,18 @@ class MainProblemOrchestrator:
    
 
     def _random_assign_constraints(self):
+        """
+        Randomly assign macro-constraints to subproblems.
+
+        Returns:
+            Assignment dictionary for inequality constraints.
+        """
         inequality_constraints_assignment = {}
         
         for macro_idx,macro_constraint in enumerate(self.macro_constraints):
             if macro_idx in self.shared_macro_contraints:
+                if self.num_subproblems == 0:
+                    self.num_subproblems = 1
                 for inequality_constraint_idx in macro_constraint:
                     inequality_constraints_assignment[inequality_constraint_idx] = {
                         'to': [i for i in range(self.num_subproblems)],
@@ -446,6 +613,12 @@ class MainProblemOrchestrator:
         return inequality_constraints_assignment
     
     def _group_assign_constraints(self):
+        """
+        Assign binary fairness constraints to subproblems by group structure.
+
+        Returns:
+            Assignment dictionary for inequality constraints.
+        """
         inequality_constraints_assignment = {}
         self.num_subproblems = 0
         for group_name,_ in self.all_group_ids.items():
@@ -464,6 +637,8 @@ class MainProblemOrchestrator:
             self.num_subproblems += num_subproblems +1
         for macro_idx,macro_constraint in enumerate(self.macro_constraints):
             if macro_idx in self.shared_macro_contraints:
+                if self.num_subproblems == 0:
+                    self.num_subproblems = 1
                 for inequality_constraint_idx in macro_constraint:
                     inequality_constraints_assignment[inequality_constraint_idx] = {
                         'to': [i for i in range(self.num_subproblems)],
@@ -473,6 +648,12 @@ class MainProblemOrchestrator:
         return inequality_constraints_assignment
     
     def _group_assign_constraints_multiclass(self):
+        """
+        Assign multiclass fairness constraints to class-aware subproblems.
+
+        Returns:
+            Assignment dictionary for inequality constraints.
+        """
         inequality_constraints_assignment = {}
         self.num_subproblems = 0
         for group_name,_ in self.all_group_ids.items():
@@ -492,6 +673,8 @@ class MainProblemOrchestrator:
                 self.num_subproblems += num_subproblems +1
         for macro_idx,macro_constraint in enumerate(self.macro_constraints):
             if macro_idx in self.shared_macro_contraints:
+                if self.num_subproblems == 0:
+                    self.num_subproblems = 1
                 for inequality_constraint_idx in macro_constraint:
                     inequality_constraints_assignment[inequality_constraint_idx] = {
                         'to': [i for i in range(self.num_subproblems)],
@@ -501,6 +684,15 @@ class MainProblemOrchestrator:
         return inequality_constraints_assignment
     
     def _split_assignments(self,assignment):
+        """
+        Split oversized assignments into smaller subproblems.
+
+        Args:
+            assignment: Initial constraint-to-subproblem assignment.
+
+        Returns:
+            Assignment dictionary respecting ``max_constraints_in_subproblem``.
+        """
         new_assignments = copy.deepcopy(assignment)
         for _,value in new_assignments.items():
             value['to'] = []
@@ -549,7 +741,7 @@ class MainProblemOrchestrator:
                 
                 num_subproblems += 1
        
-        self.num_subproblems = num_subproblems
+        self.num_subproblems = max(1, num_subproblems) if len(self.macro_constraints) > 0 else num_subproblems
        
         for macro_idx,macro_constraint in enumerate(self.macro_constraints):
             if macro_idx in self.shared_macro_contraints:
@@ -562,6 +754,16 @@ class MainProblemOrchestrator:
         return new_assignments
     
     def _set_violation_per_subproblem(self,violations_dict, val_violations_dict):
+        """
+        Attach current violation magnitudes to each subproblem.
+
+        Args:
+            violations_dict: Training violation dictionary.
+            val_violations_dict: Validation violation dictionary.
+
+        Returns:
+            Tuple of training and validation violation maps per subproblem.
+        """
         self.violation_per_subproblem = {i:0 for i in range(self.num_subproblems)}
         self.val_violation_per_subproblem = {i:0 for i in range(self.num_subproblems)}
         for key,value in enumerate(violations_dict['inequality_constraints_violations']):
@@ -580,6 +782,12 @@ class MainProblemOrchestrator:
     
 
     def _unique_assignment(self):
+        """
+        Create a single assignment containing all constraints.
+
+        Returns:
+            Assignment dictionary with one subproblem.
+        """
         inequality_constraints_assignment = {}
         self.num_subproblems = 1
         
@@ -593,9 +801,15 @@ class MainProblemOrchestrator:
         return inequality_constraints_assignment
     
     def assign_constraints(self,violations_dict=None):
+        """
+        Assign fairness constraints to local subproblems.
+
+        Args:
+            violations_dict: Optional violation information for adaptive assignment.
+        """
         if self.split_problem and len(self.macro_constraints) > 0:
-            if self.num_classes <0 :
-                print('Using group assignment for multiclass problem')
+            if self.num_classes > 2:
+                debug_print('Using group assignment for multiclass problem')
                 group_assignment = self._group_assign_constraints_multiclass()
             else:
                 group_assignment = self._group_assign_constraints()
@@ -610,6 +824,16 @@ class MainProblemOrchestrator:
             self._set_violation_per_subproblem(violations_dict)
 
     def build_subproblem(self,problem_id,eval_problem=False):
+        """
+        Build a subproblem configuration.
+
+        Args:
+            problem_id: Subproblem identifier, or ``-1`` for evaluation.
+            eval_problem: Whether to include all constraints for evaluation.
+
+        Returns:
+            ``SubProblemConfig`` ready to instantiate a local learner.
+        """
         
         if eval_problem:
             return SubProblemConfig(id=problem_id,
@@ -645,12 +869,35 @@ class MainProblemOrchestrator:
                          all_group_ids=self.all_group_ids,
                          aggregation_teachers_list=self.aggregation_teachers_list)
 
-    def evaluate(self,model,val_kwargs=None):
+    def evaluate(self, model, split='val', eval_kwargs=None):
+        """
+        Evaluate model metrics through the full evaluation subproblem.
+
+        Args:
+            model: Model instance to evaluate.
+            split: Evaluation split. Must be ``val`` or ``test``.
+            eval_kwargs: Optional payload precomputed for ``split``.
+
+        Returns:
+            Metric dictionary.
+        """
         self.eval_subproblem.instance.set_teachers_kwargs(self.teachers_kwargs)
-        metrics = self.eval_subproblem.instance.evaluate(model.state_dict(),val_kwargs=val_kwargs)
+        payload = {f'{split}_kwargs': eval_kwargs} if eval_kwargs is not None else {}
+        metrics = self.eval_subproblem.instance.evaluate(
+            model.state_dict(), split=split, **payload)
         return metrics
     
     def select_subproblem(self, c1=100.0, c2=1.0):
+        """
+        Select the next subproblem to optimize.
+
+        Args:
+            c1: Scale factor for violation-based selection.
+            c2: Reserved exploration scale.
+
+        Returns:
+            Selected subproblem id.
+        """
   
         #print('Selecting subproblems among',self.num_subproblems,'subproblems')
         violations_per_subproblem_tensor = torch.tensor([self.violation_per_subproblem[i] for i in range(self.num_subproblems)])
@@ -683,28 +930,36 @@ class MainProblemOrchestrator:
         return selected
     
     def load_final_model(self):
+        """
+        Load the best checkpointed model from local learner checkpoints.
+
+        Returns:
+            Loaded checkpoint dictionary, or an empty dictionary if unavailable.
+        """
         save_dict ={}
         for checkpoint in self.checkpoints:
             if isinstance(checkpoint, ModelCheckpoint):
                 if self.verbose:
-                    print('Loading best model from:',checkpoint.get_model_path())
+                    debug_print('Loading best model from:',checkpoint.get_model_path())
                 if os.path.exists(checkpoint.get_model_path()):
                     save_dict=self.load(checkpoint.get_model_path())
                 else:
                     if self.verbose:
-                        print('No model found in:',checkpoint.get_model_path())
+                        debug_print('No model found in:',checkpoint.get_model_path())
                     break
         #print('Loading final model:',save_dict['inequality_lambdas'])
         
         return save_dict
     
     def eval_final_model(self):
+        """
+        Evaluate and log final metrics for the current model.
+        """
         self.load_final_model()
         self.model.eval()
         metrics = self.evaluate(self.model)
         if self.verbose:
-            print('Best model evaluated: ', metrics)
+            debug_print('Best model evaluated: ', metrics)
         final_metrics = {f'final_{name}': value for name, value in metrics.items()}
         if self.logger is not None:
             self.logger.log(final_metrics)
-

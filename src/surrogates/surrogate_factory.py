@@ -1,14 +1,31 @@
 _SURROGATES = {}
 def register_surrogate(surrogate_name):
+    """Register surrogate.
+    
+    Args:
+        surrogate_name: Registered object name.
+    """
     def decorator(fn):
+        """Register the decorated class or function and return it unchanged.
+        
+        Args:
+            fn: Callable or class being registered.
+        """
         _SURROGATES[surrogate_name] = fn
         return fn
     return decorator
 
 
 class SurrogateFactory:
+    """Factory for constructing registered surrogate functions."""
     @staticmethod
     def create(name,**kwargs):
+        """Create a registered instance.
+        
+        Args:
+            name: Registered object name.
+            **kwargs: Additional options forwarded to the implementation.
+        """
         if name not in _SURROGATES:
             raise ValueError(f"Surrogate {name} not found")
         return _SURROGATES[name](**kwargs)

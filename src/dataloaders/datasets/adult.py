@@ -25,6 +25,11 @@ class AdultDataset(BaseDataset):
         setup(): Sets up the dataset for loading and processing.
     """
     def __init__(self,**kwargs):
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super(AdultDataset, self).__init__(**kwargs)
         self.root = kwargs.get('root', 'data/Adult')
         data_name = kwargs['filename']

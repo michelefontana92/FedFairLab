@@ -1,11 +1,11 @@
-from .employment_run import EmploymentRun
+from .income_run import IncomeRun
 from ..run_factory import register_run
 from builder import FedFairLabBuilder
 
 
-@register_run('employment_fedfairlab')
-class EmploymentFedFairLabRun(EmploymentRun):
-    """FedFairLab experiment configuration for Employment."""
+@register_run('income_fedfairlab')
+class IncomeFedFairLabRun(IncomeRun):
+    """FedFairLab experiment configuration for binary Income prediction."""
     def __init__(self, **kwargs) -> None:
         """Initialize the object.
         
@@ -19,7 +19,7 @@ class EmploymentFedFairLabRun(EmploymentRun):
     def setUp(self):
         """Handle setUp."""
         pass
-    
+
     def run(self):
         """Handle run."""
         self.builder.run()

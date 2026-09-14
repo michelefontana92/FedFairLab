@@ -1,3 +1,4 @@
+from debug_utils import debug_print
 from .surrogate_factory import register_surrogate
 from .soft_confusion_matrix.performance import *
 from torch.nn import functional as F
@@ -6,7 +7,13 @@ from entmax import entmax_bisect
 
 @register_surrogate('binary_accuracy')
 class BinaryAccuracySurrogate:
+    """Implementation of BinaryAccuracySurrogate."""
     def __init__(self,**kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.name = kwargs.get('surrogate_name','surrogate')
         self.weight = kwargs.get('weight',1.0)
         self.average = kwargs.get('average',None)
@@ -16,6 +23,11 @@ class BinaryAccuracySurrogate:
         self.group_name = None
         
     def __call__(self,**kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         logits = kwargs.get('logits')
         labels = kwargs.get('labels')
        
@@ -32,7 +44,13 @@ class BinaryAccuracySurrogate:
 
 @register_surrogate('binary_precision')
 class BinaryPrecisionSurrogate:
+    """Implementation of BinaryPrecisionSurrogate."""
     def __init__(self,**kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.name = kwargs.get('surrogate_name','surrogate')
         self.weight = kwargs.get('weight',1.0)
         self.average = kwargs.get('average',None)
@@ -42,6 +60,11 @@ class BinaryPrecisionSurrogate:
         self.group_name = None
 
     def __call__(self,**kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         logits = kwargs.get('logits')
         labels = kwargs.get('labels')
         probabilities = entmax_bisect(logits, alpha=1.5, dim=-1)
@@ -59,7 +82,13 @@ class BinaryPrecisionSurrogate:
 
 @register_surrogate('binary_recall')
 class BinaryRecallSurrogate:
+    """Implementation of BinaryRecallSurrogate."""
     def __init__(self,**kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.name = kwargs.get('surrogate_name','surrogate')
         self.weight = kwargs.get('weight',1.0)
         self.average = kwargs.get('average',None)
@@ -69,6 +98,11 @@ class BinaryRecallSurrogate:
         self.group_name = None
         
     def __call__(self,**kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         logits = kwargs.get('logits')
         labels = kwargs.get('labels')
         #probabilities = F.softmax(logits/0.2,dim=1)
@@ -86,7 +120,13 @@ class BinaryRecallSurrogate:
 
 @register_surrogate('binary_f1')
 class BinaryF1Surrogate:
+    """Implementation of BinaryF1Surrogate."""
     def __init__(self,**kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.name = kwargs.get('surrogate_name','surrogate')
         self.weight = kwargs.get('weight',1.0)
         self.average = kwargs.get('average',None)
@@ -97,12 +137,17 @@ class BinaryF1Surrogate:
         self.group_name = None
         
     def __call__(self,**kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         labels = kwargs.get('labels')
         probabilities = kwargs.get('probabilities')
         assert probabilities is not None, 'probabilities must be provided'
         # Controllo NaN nei probabilities
         if torch.isnan(probabilities).any():
-            print('Probabilities contengono NaN!')
+            debug_print('Probabilities contengono NaN!')
             probabilities = torch.nan_to_num(probabilities, nan=0.0)  # Sostituisci NaN nei logits
         
         
@@ -121,7 +166,13 @@ class BinaryF1Surrogate:
 
 @register_surrogate('multiclass_f1')
 class MulticlassF1Surrogate:
+    """Implementation of MulticlassF1Surrogate."""
     def __init__(self,**kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.name = kwargs.get('surrogate_name','surrogate')
         self.weight = kwargs.get('weight',1.0)
         self.average = kwargs.get('average','weighted')
@@ -132,12 +183,17 @@ class MulticlassF1Surrogate:
         self.group_name = None
         
     def __call__(self,**kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         labels = kwargs.get('labels')
         probabilities = kwargs.get('probabilities')
         assert probabilities is not None, 'probabilities must be provided'
         # Controllo NaN nei probabilities
         if torch.isnan(probabilities).any():
-            print('Probabilities contengono NaN!')
+            debug_print('Probabilities contengono NaN!')
             probabilities = torch.nan_to_num(probabilities, nan=0.0)  # Sostituisci NaN nei logits
         
     
@@ -153,7 +209,13 @@ class MulticlassF1Surrogate:
             return f1 
 @register_surrogate('binary_true_positive')
 class BinaryTruePositiveSurrogate:
+    """Implementation of BinaryTruePositiveSurrogate."""
     def __init__(self,**kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.name = kwargs.get('surrogate_name','surrogate')
         self.weight = kwargs.get('weight',1.0)
         self.average = kwargs.get('average',None)
@@ -163,6 +225,11 @@ class BinaryTruePositiveSurrogate:
         self.group_name = None
     
     def __call__(self,**kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         logits = kwargs.get('logits')
         labels = kwargs.get('labels')
         #probabilities = F.softmax(logits/0.2,dim=1)
@@ -182,7 +249,13 @@ class BinaryTruePositiveSurrogate:
 
 @register_surrogate('binary_true_negative')
 class BinaryTrueNegativeSurrogate:
+    """Implementation of BinaryTrueNegativeSurrogate."""
     def __init__(self,**kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.name = kwargs.get('surrogate_name','surrogate')
         self.weight = kwargs.get('weight',1.0)
         self.average = kwargs.get('average',None)
@@ -192,6 +265,11 @@ class BinaryTrueNegativeSurrogate:
         self.group_name = None
     
     def __call__(self,**kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         logits = kwargs.get('logits')
         labels = kwargs.get('labels')
         #probabilities = F.softmax(logits/0.2,dim=1)
@@ -211,7 +289,13 @@ class BinaryTrueNegativeSurrogate:
 
 @register_surrogate('binary_false_positive')
 class BinaryFalsePositiveSurrogate:
+    """Implementation of BinaryFalsePositiveSurrogate."""
     def __init__(self,**kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.name = kwargs.get('surrogate_name','surrogate')
         self.weight = kwargs.get('weight',1.0)
         self.average = kwargs.get('average',None)
@@ -221,6 +305,11 @@ class BinaryFalsePositiveSurrogate:
         self.group_name = None
 
     def __call__(self,**kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         logits = kwargs.get('logits')
         labels = kwargs.get('labels')
         #probabilities = F.softmax(logits/0.2,dim=1)
@@ -240,7 +329,13 @@ class BinaryFalsePositiveSurrogate:
 
 @register_surrogate('binary_false_negative')
 class BinaryFalseNegativeSurrogate:
+    """Implementation of BinaryFalseNegativeSurrogate."""
     def __init__(self,**kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.name = kwargs.get('surrogate_name','surrogate')
         self.weight = kwargs.get('weight',1.0)
         self.average = kwargs.get('average',None)
@@ -250,6 +345,11 @@ class BinaryFalseNegativeSurrogate:
         self.group_name = None
 
     def __call__(self,**kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         logits = kwargs.get('logits')
         labels = kwargs.get('labels')
         #probabilities = F.softmax(logits/0.2,dim=1)

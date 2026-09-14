@@ -8,13 +8,22 @@ from loggers import BaseLogger
 from callbacks import EarlyStopping, ModelCheckpoint
 from dataloaders import DataModule
 from metrics import BaseMetric,Performance,GroupFairnessMetric
+from checkpoint_utils import load_trusted_checkpoint
 
 class EarlyStoppingException(Exception):
+    """Implementation of EarlyStoppingException."""
     pass
 
 class TorchNNWrapper(BaseWrapper):
     
+    """Implementation of TorchNNWrapper."""
     def __init__(self, *args, **kwargs):
+        """Initialize the object.
+        
+        Args:
+            *args: Positional arguments forwarded to the implementation.
+            **kwargs: Additional options forwarded to the implementation.
+        """
         super().__init__()
         
         self.model = kwargs.get('model')
@@ -61,6 +70,12 @@ class TorchNNWrapper(BaseWrapper):
 
     
     def _training_step(self,batch,batch_idx):
+        """Handle training step.
+        
+        Args:
+            batch: Mini-batch dictionary from a data loader.
+            batch_idx: Index of the mini-batch within the epoch.
+        """
         self.model.train()
         inputs = batch['data'] 
         targets = batch['labels']
@@ -74,6 +89,12 @@ class TorchNNWrapper(BaseWrapper):
         return loss.item()
     
     def _validation_step(self,batch,batch_idx):
+        """Handle validation step.
+        
+        Args:
+            batch: Mini-batch dictionary from a data loader.
+            batch_idx: Index of the mini-batch within the epoch.
+        """
         self.model.eval()
         with torch.no_grad():
             inputs = batch['data']
@@ -90,6 +111,12 @@ class TorchNNWrapper(BaseWrapper):
             return loss.item(), outputs, targets, predictions
     
     def _predict_step(self,batch,batch_idx):
+        """Handle predict step.
+        
+        Args:
+            batch: Mini-batch dictionary from a data loader.
+            batch_idx: Index of the mini-batch within the epoch.
+        """
         self.model.eval()
         with torch.no_grad():
             inputs = batch['data']
@@ -99,6 +126,16 @@ class TorchNNWrapper(BaseWrapper):
         
     def _compute_metrics(self,metrics,y_pred,y_true,
                          group_ids,prefix='val',**kwargs):
+        """Handle compute metrics.
+        
+        Args:
+            metrics: Metric objects or metric dictionary.
+            y_pred: Predicted labels or model outputs.
+            y_true: Ground-truth labels.
+            group_ids: Identifiers of the groups involved in the computation.
+            prefix: Metric-name prefix identifying the data split.
+            **kwargs: Additional options forwarded to the implementation.
+        """
         tmp_result = {}
         final_result = {}
        
@@ -130,6 +167,16 @@ class TorchNNWrapper(BaseWrapper):
                                 group_id,metric,
                                 ):
      
+        """Compute stat per group.
+        
+        Args:
+            data_loader: Data loader used for inference or evaluation.
+            group_id: Group identifier used for filtering or statistics.
+            metric: Metric object to evaluate.
+        
+        Returns:
+            Requested result.
+        """
         metric.reset()
         self.model.to(self.device)
         for batch_idx, batch in enumerate(data_loader):
@@ -145,6 +192,14 @@ class TorchNNWrapper(BaseWrapper):
 
     # Fit the model
     def fit(self,**kwargs):
+        """Train.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        
+        Returns:
+            Requested result.
+        """
         weight = self.data_module.get_class_weights().to(self.device)
         self.loss = self.loss_fn(weight=weight)
         num_epochs = kwargs.get('num_epochs',-1)
@@ -250,6 +305,14 @@ class TorchNNWrapper(BaseWrapper):
     
     # Predict the target variable for the input data. The input data is a torch.Dataset object.
     def predict(self, data_loader):
+        """Predict labels.
+        
+        Args:
+            data_loader: Data loader used for inference or evaluation.
+        
+        Returns:
+            Requested result.
+        """
         all_predictions=[]
         self.model.to(self.device)
         with torch.no_grad():
@@ -264,6 +327,14 @@ class TorchNNWrapper(BaseWrapper):
         
     # Predict the probabilities of the target variable for the input data     
     def predict_proba(self, data_loader):
+        """Predict class probabilities.
+        
+        Args:
+            data_loader: Data loader used for inference or evaluation.
+        
+        Returns:
+            Requested result.
+        """
         self.model.to(self.device)
         with torch.no_grad():
             self.model.eval()
@@ -274,6 +345,16 @@ class TorchNNWrapper(BaseWrapper):
             return torch.cat(all_probabilities, dim=0).detach().cpu()
 
     def score(self, data_loader,metrics,prefix=''):
+        """Compute a score.
+        
+        Args:
+            data_loader: Data loader used for inference or evaluation.
+            metrics: Metric objects or metric dictionary.
+            prefix: Metric-name prefix identifying the data split.
+        
+        Returns:
+            Requested result.
+        """
         assert len(data_loader) == 1, "Data loader should have a single batch"
         assert isinstance(metrics, list), "Metrics should be a list"
         self.model.to(self.device)
@@ -290,18 +371,38 @@ class TorchNNWrapper(BaseWrapper):
     
     # Save the model to the specified path. The path should include the file name and extension.
     def save(self, path):
+        """Save.
+        
+        Args:
+            path: Filesystem path to read from or write to.
+        """
         torch.save(self.model.state_dict(), path)
 
     # Load the model from the specified path. The path should include the file name and extension.
     def load(self, path):
-       self.model.load_state_dict(torch.load(path))
+       """Load.
+       
+       Args:
+           path: Filesystem path to read from or write to.
+       """
+       self.model.load_state_dict(load_trusted_checkpoint(path))
     
     # Get the parameters of the model
     def get_params(self):
+        """Return params.
+        
+        Returns:
+            Requested result.
+        """
         return self.model.state_dict()
     
     # Set the parameters of the model
     def set_params(self,model_src):
+        """Set params.
+        
+        Args:
+            model_src: Source model whose parameters should be copied.
+        """
         assert isinstance(model_src,torch.nn.Module), "model_src should be an instance of torch.nn.Module"
         model_dst_dict = self.model.state_dict()
         model_src_dict = model_src.state_dict()
@@ -310,6 +411,11 @@ class TorchNNWrapper(BaseWrapper):
         self.model.load_state_dict(model_dst_dict)
 
     def set_params_from_dict(self,model_src_dict):
+        """Set params from dict.
+        
+        Args:
+            model_src_dict: Source state dictionary to copy from.
+        """
         assert isinstance(model_src_dict,dict), "model_src_dict should be a dictionary"
         model_dst_dict = self.model.state_dict()
         for key in model_src_dict.keys():
@@ -317,6 +423,13 @@ class TorchNNWrapper(BaseWrapper):
         self.model.load_state_dict(model_dst_dict)   
     
     def reset(self,optimizer_fn,callbacks_fn,keep_best=False):
+        """Reset.
+        
+        Args:
+            optimizer_fn: Callable or class being registered.
+            callbacks_fn: Callable or class being registered.
+            keep_best: Whether to restore the best checkpoint after training.
+        """
         self.optimizer = optimizer_fn(
               self.model.parameters()
               )
@@ -325,6 +438,11 @@ class TorchNNWrapper(BaseWrapper):
         self.checkpoints = [callback_fn() for callback_fn in callbacks_fn]
         
     def model_checkpoint(self,models_list):
+        """Handle model checkpoint.
+        
+        Args:
+            models_list: Models or state dictionaries to checkpoint/evaluate.
+        """
         best_model_idx = 0
         original_model_dict = self.model.state_dict().copy()
         for idx,model in enumerate(models_list):
@@ -344,10 +462,30 @@ class TorchNNWrapper(BaseWrapper):
         return best_model_idx
 
     def get_train_loader(self):
+        """Return train loader.
+        
+        Returns:
+            Requested result.
+        """
         return self.data_module.train_loader()
     def get_val_loader(self):
+        """Return val loader.
+        
+        Returns:
+            Requested result.
+        """
         return self.data_module.val_loader()
     def get_train_loader_eval(self):
+        """Return train loader eval.
+        
+        Returns:
+            Requested result.
+        """
         return self.data_module.train_loader_eval()
     def get_group_ids(self):
+        """Return group ids.
+        
+        Returns:
+            Requested result.
+        """
         return self.data_module.get_group_ids()

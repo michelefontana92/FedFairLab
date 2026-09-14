@@ -1,15 +1,23 @@
 from ..base_run import BaseRun
 from architectures import ArchitectureFactory
 
-class FolkTablesBinaryRun(BaseRun):
+class IncomeRun(BaseRun):
     
+    """Dataset and model configuration for binary Income prediction."""
     def __init__(self,**kwargs):
-        super(FolkTablesBinaryRun, self).__init__(**kwargs)
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
+        super().__init__(**kwargs)
         self.num_classes=2
         self.input = 20
         self.hidden1 = 300
         self.hidden2 = 100
         self.dropout = 0.2
+        self.learning_rate = 1e-4
+        self.batch_size = 128
         self.output = self.num_classes
     
         self.model = ArchitectureFactory.create_architecture('mlp2hidden',model_params={
@@ -18,9 +26,10 @@ class FolkTablesBinaryRun(BaseRun):
                                                 'hidden2': self.hidden2,
                                                 'dropout': self.dropout,
                                                 'output': self.output})
-        self.dataset = 'folktables_binary'
-        self.data_root  = '../data/Folktables_binary'
-        self.clean_data_path = '../data/Folktables_binary/folktables_CA_binary_clean.csv'
+        self.dataset = 'income'
+        self.data_file_prefix = 'income'
+        self.data_root = self.resolve_experiment_data_root(kwargs, 'Income')
+        self.clean_data_path = kwargs.get('clean_data_path') or f'{self.data_root}/income_clean.csv'
         
         self.sensitive_attributes = kwargs.get('sensitive_attributes',[
                                                 
@@ -84,12 +93,15 @@ class FolkTablesBinaryRun(BaseRun):
                                                     
                                                     ]
                                                 )
+        self.configure_validation_splits(
+            kwargs, 'PINCP', ('Race', 'Marital'))
                                              
-    def eval(self):
-        pass
     def setUp(self):
+        """Handle setUp."""
         pass
     def run(self):
+        """Handle run."""
         pass
     def tearDown(self):
+        """Handle tearDown."""
         pass

@@ -1,20 +1,32 @@
+from debug_utils import debug_print
 from .surrogate_factory import register_surrogate
 from torch.nn import CrossEntropyLoss
 
 @register_surrogate('performance')
 class PerformanceSurrogate:
+    """Implementation of PerformanceSurrogate."""
     def __init__(self,**kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.name = kwargs.get('name','surrogate')
         self.weight = kwargs.get('weight',1.0)
         loss_params = kwargs.get('loss_params',{})
         self.target_groups = None
         self.loss = CrossEntropyLoss(reduction='mean',**loss_params)
     def __call__(self,**kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         logits = kwargs.get('logits')
         labels = kwargs.get('labels')       
         class_weights = kwargs.get('class_weights')
         if class_weights is not None:
-            print(f"Using class weights: {class_weights}")
+            debug_print(f"Using class weights: {class_weights}")
             self.loss = CrossEntropyLoss(weight=class_weights, reduction='mean', **kwargs.get('loss_params', {}))
         final_loss = self.loss(logits,labels.long().view(-1,)).squeeze()
        
@@ -27,7 +39,13 @@ class PerformanceSurrogate:
 
 @register_surrogate('performance_batch')
 class PerformanceSurrogate:
+    """Implementation of PerformanceSurrogate."""
     def __init__(self,**kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.name = kwargs.get('name','surrogate')
         self.weight = kwargs.get('weight',1.0)
         loss_params = kwargs.get('loss_params',{})
@@ -35,6 +53,11 @@ class PerformanceSurrogate:
         self.group_name = None
         self.loss = CrossEntropyLoss(reduction='none',**loss_params)
     def __call__(self,**kwargs):
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         logits = kwargs.get('logits')
         labels = kwargs.get('labels')
         final_loss = self.loss(logits,labels.long().view(-1,)).squeeze()

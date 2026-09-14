@@ -1,11 +1,10 @@
-from .employment_run import EmploymentRun
+from .meps_run import MEPSRun
 from ..run_factory import register_run
 from builder import FedFairLabBuilder
 
-
-@register_run('employment_fedfairlab')
-class EmploymentFedFairLabRun(EmploymentRun):
-    """FedFairLab experiment configuration for Employment."""
+@register_run('meps_fedfairlab')
+class MEPSFedFairLabRun(MEPSRun):
+    """FedFairLab experiment configuration for MEPS."""
     def __init__(self, **kwargs) -> None:
         """Initialize the object.
         
@@ -23,7 +22,7 @@ class EmploymentFedFairLabRun(EmploymentRun):
     def run(self):
         """Handle run."""
         self.builder.run()
-
+          
     def tearDown(self) -> None:
         """Handle tearDown."""
         super().tearDown()

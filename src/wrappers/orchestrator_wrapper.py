@@ -1,3 +1,4 @@
+from debug_utils import debug_print
 
 from wrappers import TorchNNWrapper
 import copy
@@ -8,19 +9,20 @@ from callbacks import EarlyStoppingException
 
 class OrchestratorWrapper(TorchNNWrapper):
     """
-    Implementation of the orchestrator.
+    Wrapper around the FairLAB main-problem orchestrator.
 
-    Methods:
-        fit(num_global_iterations=5, num_local_epochs=5, num_subproblems=5):
-            Fits the model using the specified number of global iterations, local epochs, and subproblems.
-            Args:
-                num_global_iterations (int): Number of global iterations. Default is 5.
-                num_local_epochs (int): Number of local epochs. Default is 5.
-                num_subproblems (int): Number of subproblems. Default is 5.
-            Returns:
-                The trained model.
+    It owns the model instance used by a client and exposes a compact API for
+    training, evaluation, constraint evaluation, and ensemble-logit computation.
     """
     def __init__(self, *args,**kwargs):
+        """
+        Initialize the orchestrator wrapper and build the main FairLAB problem.
+
+        Args:
+            *args: Forwarded to ``TorchNNWrapper``.
+            **kwargs: Model, constraints, objectives, optimizer, data module,
+                metrics, callbacks, and FedFairLab aggregation settings.
+        """
         super(OrchestratorWrapper, self).__init__(*args, **kwargs)
         # Estrarre i parametri necessari da kwargs, con valori di default ove appropriato
         self.loss_fn = kwargs.get('loss')
@@ -48,6 +50,8 @@ class OrchestratorWrapper(TorchNNWrapper):
         self.checkpoints = kwargs.get("checkpoints")
         self.checkpoints_config = kwargs.get("checkpoints_config")
         self.delta = kwargs.get("delta")
+        self.performance_budget = kwargs.get("performance_constraint")
+        self.performance_step = kwargs.get("performance_step", 0.0)
        
         self.current_model = self.model
         self.shared_macro_constraints = kwargs.get("shared_macro_constraints",[])
@@ -66,14 +70,29 @@ class OrchestratorWrapper(TorchNNWrapper):
                 'data_module':self.data_module,
                 'verbose':self.verbose,  
                 'inequality_lambdas_0_value': 0,
+                'performance_budget': self.performance_budget,
+                'performance_step': self.performance_step,
             }
         
         self._build_main_problem()
     
     def set_model_params(self,model_params):
+        """
+        Load model parameters into the wrapped model.
+
+        Args:
+            model_params: State dict to load.
+        """
         self.model.load_state_dict(model_params)
     
     def _build_main_problem(self,num_subproblems=5):
+        """
+        Instantiate the FairLAB main-problem controller.
+
+        Args:
+            num_subproblems: Number of subproblems used when partitioning
+                fairness constraints.
+        """
         for checkpoint in self.checkpoints:
             checkpoint.reset()
         #print('Teacher list:',len(self.aggregation_teachers_list))
@@ -100,13 +119,34 @@ class OrchestratorWrapper(TorchNNWrapper):
         
     
     def fit(self,model_params, num_global_iterations=1,num_local_epochs=5,num_subproblems=5,state=None,
-            aggregation_teachers_list=[],aggregation_weights=None):
+            aggregation_teachers_list=[],aggregation_weights=None,aggregation_teacher_logits=None):
+        """
+        Train the wrapped model for a local or aggregation problem.
+
+        Args:
+            model_params: Starting model state dict.
+            num_global_iterations: Number of orchestrator iterations.
+            num_local_epochs: Epochs per selected local learner.
+            num_subproblems: Constraint partitions to use.
+            state: Optional persisted ALM/local client state.
+            aggregation_teachers_list: Teacher model state dicts for local KD.
+            aggregation_weights: Optional surrogate weights.
+            aggregation_teacher_logits: Precomputed global ensemble target for
+                aggregation-phase distillation.
+
+        Returns:
+            Tuple ``(model, state)`` with the updated model and persisted state.
+        """
         
         self.main_problem.reset()
         self.main_problem.model.load_state_dict(model_params)
         self.main_problem.aggregation_teachers_list = aggregation_teachers_list
+        self.main_problem.aggregation_teacher_logits = aggregation_teacher_logits
+        self.main_problem.query_teachers()
+        self.main_problem.eval_subproblem.instance.set_teachers_kwargs(
+            self.main_problem.teachers_kwargs)
 
-        print('Number of aggregation teachers:',len(self.main_problem.aggregation_teachers_list))
+        debug_print('Number of aggregation teachers:',len(self.main_problem.aggregation_teachers_list))
         if self.logger is not None:
             metrics = self.main_problem.evaluate(self.main_problem.model)
             self.logger.log(metrics)
@@ -121,7 +161,7 @@ class OrchestratorWrapper(TorchNNWrapper):
                 self.main_problem.teacher_history = current_state['teacher_history']
             for i in range(num_global_iterations):
                 if self.verbose:
-                    print('Iteration',i)
+                    debug_print('Iteration',i)
                 #print('Iteration',i)
                 
                 new_state = self.main_problem.iterate(
@@ -134,23 +174,42 @@ class OrchestratorWrapper(TorchNNWrapper):
                 current_state.update(new_state['state'])
         
         except EarlyStoppingException:
-            print('Early stopping')
+            debug_print('Early stopping')
 
         
         #state = self.get_state()
         self.main_problem.load_final_model()
         #state = self.get_state()
+        self.main_problem.aggregation_teacher_logits = None
         return self.main_problem.model,current_state
     
-    def evaluate(self,model_params):
+    def evaluate(self, model_params, split='val'):
+        """
+        Evaluate a model using the main problem metrics.
+
+        Args:
+            model_params: State dict to evaluate.
+
+        Returns:
+            Metric dictionary.
+        """
         
         model = copy.deepcopy(self.model)
         model.load_state_dict(model_params)
-        metrics = self.main_problem.evaluate(model)
+        metrics = self.main_problem.evaluate(model, split=split)
         return metrics
     
     
     def evaluate_constraints(self,model_params):
+        """
+        Compute train and validation constraint violations.
+
+        Args:
+            model_params: State dict to evaluate.
+
+        Returns:
+            Dictionary containing train and validation constraint outputs.
+        """
         
         model = copy.deepcopy(self.model)
         model.load_state_dict(model_params)
@@ -159,34 +218,81 @@ class OrchestratorWrapper(TorchNNWrapper):
                 'val':val_constraints}
     
     def compute_kwargs(self,model_params,use_training=False):
-        
-        model = copy.deepcopy(self.model)
-        model.load_state_dict(model_params)
+        """
+        Build the tensor payload used by objectives, metrics, and constraints.
+
+        Args:
+            model_params: State dict to evaluate.
+            use_training: If true, use the training split; otherwise validation.
+
+        Returns:
+            Dictionary of logits, labels, groups, probabilities and masks.
+        """
         kwargs = self.main_problem.eval_subproblem.instance.compute_val_kwargs(model_params,use_training=use_training)
         return kwargs
     
     def compute_score(self,model_params,use_training=False):
+        """
+        Compute the orchestrator score for a model.
+
+        Args:
+            model_params: State dict to score.
+            use_training: Whether to score on the training split.
+
+        Returns:
+            Scalar score tensor/value from the local learner.
+        """
         kwargs = self.compute_kwargs(model_params,use_training=use_training)
         score = self.main_problem.eval_subproblem.instance.compute_score(**kwargs)
         return score
+
+    def compute_weighted_ensemble_logits(self,model_params_list,weights,use_training=True):
+        """
+        Compute weighted ensemble logits on the client's local data.
+
+        Args:
+            model_params_list: Candidate model state dicts.
+            weights: Ensemble weights associated with the candidates.
+            use_training: Whether to use the training split.
+
+        Returns:
+            Tensor of weighted logits.
+        """
+        return self.main_problem.compute_weighted_ensemble_logits(
+            teacher_model_dict_list=model_params_list,
+            weights=weights,
+            use_training=use_training,
+        )
     
-    def evaluate_constraints2(self,model_params):
+    def evaluate_constraints2(self, model_params, split='val'):
+        """
+        Evaluate validation constraints and task metrics for server scoring.
+
+        Args:
+            model_params: State dict to evaluate.
+
+        Returns:
+            Dictionary with validation constraint violations, objective value and
+            metric values.
+        """
        
         model = copy.deepcopy(self.model)
         model.load_state_dict(model_params)
         
-        val_kwargs=self.main_problem.eval_subproblem.instance.compute_val_kwargs(model_params,use_training=False)
+        eval_kwargs = self.main_problem.eval_subproblem.instance.compute_eval_kwargs(
+            model_params, split=split)
         #train_kwargs=main_problem.eval_subproblem.instance.compute_val_kwargs(model_params,use_training=True)
-        val_constraints = self.main_problem.eval_subproblem.instance.compute_violations(val_kwargs)
+        eval_constraints = self.main_problem.eval_subproblem.instance.compute_violations(eval_kwargs)
         #train_constraints = main_problem.eval_subproblem.instance.compute_violations(train_kwargs)
-        val_objective_fn = self.main_problem.eval_subproblem.instance.original_objective_fn(**val_kwargs)
+        eval_objective_fn = self.main_problem.eval_subproblem.instance.original_objective_fn(**eval_kwargs)
         #train_objective_fn = main_problem.eval_subproblem.instance.original_objective_fn(**train_kwargs)
-        metrics = self.main_problem.evaluate(model,val_kwargs=val_kwargs)
+        metrics = self.main_problem.evaluate(
+            model, split=split, eval_kwargs=eval_kwargs)
         #print('Metrics:',metrics)
         #val_constraints,train_constraints = main_problem.compute_violations(model)
         return {#'train_constraints':train_constraints,
-                'val_constraints':val_constraints,
+                f'{split}_constraints':eval_constraints,
                 #'train_objective_fn':train_objective_fn.detach().cpu().item(),
-                'val_objective_fn':val_objective_fn.detach().cpu().item(),
+                f'{split}_objective_fn':eval_objective_fn.detach().cpu().item(),
                 'metrics':metrics}
     

@@ -3,7 +3,13 @@ import torch
 from torch.nn.functional import softmax
 
 class BaseBinarySurrogate:
+    """Implementation of BaseBinarySurrogate."""
     def __init__(self, **kwargs: Any) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.group_name = kwargs.get('group_name')
         self.positive_group_id:int = kwargs.get('positive_group_id')
         self.negative_group_id:int = kwargs.get('negative_group_id')
@@ -13,6 +19,11 @@ class BaseBinarySurrogate:
         assert self.negative_group_id is not None, f'negative_group_id should not be None'
     
     def __call__(self, **kwargs) -> Any:
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         logits = kwargs.get('logits')
         group_ids_dict: dict = kwargs.get('group_ids')
         labels = kwargs.get('labels')
@@ -23,6 +34,13 @@ class BaseBinarySurrogate:
 
 
     def _calculate(self,logits, positive_mask,negative_mask):
+        """Handle calculate.
+        
+        Args:
+            logits: Model output logits.
+            positive_mask: Boolean mask for positive-label examples.
+            negative_mask: Boolean mask for negative-label examples.
+        """
         if positive_mask.sum() == 0 or negative_mask.sum() == 0:
             return 0*(logits.sum())
         probabilities = softmax(logits, dim=1)[:,1]
@@ -34,8 +52,14 @@ class BaseBinarySurrogate:
         return surrogate
 
 class BaseSurrogate:
+    """Implementation of BaseSurrogate."""
     def __init__(self, **kwargs: Any) -> None:
        
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.group_name = kwargs.get('group_name')
         self.unique_group_ids:dict = kwargs.get('unique_group_ids')
         assert isinstance(self.unique_group_ids, dict), f'unique_group_ids should be a dictionary'
@@ -48,6 +72,11 @@ class BaseSurrogate:
         self.weight = kwargs.get('weight',1.0)
         
     def _init_surrogates(self,surrogate_class:BaseBinarySurrogate):
+        """Handle init surrogates.
+        
+        Args:
+            surrogate_class: Surrogate class used for delegation or wrapping.
+        """
         self.surrogates = []
         current_group_ids = self.unique_group_ids[self.group_name]
         for i in range(len(current_group_ids)):
@@ -58,6 +87,7 @@ class BaseSurrogate:
                    negative_group_id=current_group_ids[j]))
     
     def _init_reduction(self):
+        """Handle init reduction."""
         if self.reduction == 'mean':
             reduction_fn = torch.mean
         elif self.reduction == 'max':
@@ -69,6 +99,11 @@ class BaseSurrogate:
         return reduction_fn
     
     def __call__(self, **kwargs: Any) -> Any:
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         results = self.surrogates[0](**kwargs).view(1,-1)
         for surrogate in self.surrogates[1:]:
             result = surrogate(**kwargs).view(1,-1)

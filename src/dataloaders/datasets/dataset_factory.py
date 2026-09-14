@@ -2,7 +2,17 @@ import torch
 _DATASETS ={}
 
 def register_dataset(dataset):
+    """Register dataset.
+    
+    Args:
+        dataset: Registered dataset identifier.
+    """
     def decorator(cls):
+        """Register the decorated class or function and return it unchanged.
+        
+        Args:
+            cls: Class being registered.
+        """
         if dataset in _DATASETS:
             raise ValueError(f"Cannot register duplicate dataset ({dataset})")
         if not issubclass(cls, torch.utils.data.Dataset):
@@ -12,8 +22,18 @@ def register_dataset(dataset):
     return decorator
 
 class DatasetFactory:
+    """Factory for constructing registered datasets."""
     @staticmethod
     def create_dataset(dataset, **kwargs):
+        """Create dataset.
+        
+        Args:
+            dataset: Registered dataset identifier.
+            **kwargs: Additional options forwarded to the implementation.
+        
+        Returns:
+            Requested result.
+        """
         if dataset not in _DATASETS:
             raise ValueError(f"Unknown dataset type: {dataset}")
         return _DATASETS[dataset](**kwargs)

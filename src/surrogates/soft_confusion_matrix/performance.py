@@ -1,7 +1,14 @@
+from debug_utils import debug_print
 import torch
 
 def binary_accuracy(y_hat,**kwargs):
     #print('Binary Accuracy')
+    """Handle binary accuracy.
+    
+    Args:
+        y_hat: Predicted labels or scores.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     tp = true_positive(y_hat,**kwargs)
     tn = true_negative(y_hat,**kwargs)
     fp = false_positive(y_hat,**kwargs)
@@ -12,6 +19,12 @@ def binary_accuracy(y_hat,**kwargs):
 
 
 def true_positive(y_hat, **kwargs):
+    """Handle true positive.
+    
+    Args:
+        y_hat: Predicted labels or scores.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     positive_mask = kwargs.get('positive_mask')
     get_probability = kwargs.get('get_probability', False)
     assert positive_mask is not None
@@ -28,6 +41,12 @@ def true_positive(y_hat, **kwargs):
     return positive_proba
 
 def true_negative(y_hat, **kwargs):
+    """Handle true negative.
+    
+    Args:
+        y_hat: Predicted labels or scores.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     negative_mask = ~kwargs.get('positive_mask')
     get_probability = kwargs.get('get_probability', False)
     assert negative_mask is not None
@@ -44,6 +63,12 @@ def true_negative(y_hat, **kwargs):
     return negative_proba
 
 def false_positive(y_hat, **kwargs):
+    """Handle false positive.
+    
+    Args:
+        y_hat: Predicted labels or scores.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     negative_mask = ~kwargs.get('positive_mask')
     get_probability = kwargs.get('get_probability', False)
     assert negative_mask is not None
@@ -60,6 +85,12 @@ def false_positive(y_hat, **kwargs):
     return negative_proba
 
 def false_negative(y_hat, **kwargs):
+    """Handle false negative.
+    
+    Args:
+        y_hat: Predicted labels or scores.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     positive_mask = kwargs.get('positive_mask')
     get_probability = kwargs.get('get_probability', False)
     assert positive_mask is not None
@@ -76,6 +107,12 @@ def false_negative(y_hat, **kwargs):
     return positive_proba
 
 def _precision(y_hat, **kwargs):
+    """Handle precision.
+    
+    Args:
+        y_hat: Predicted labels or scores.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     tp = true_positive(y_hat, **kwargs)
     fp = false_positive(y_hat, **kwargs)
     
@@ -86,6 +123,12 @@ def _precision(y_hat, **kwargs):
     return tp / (tp + fp)
 
 def _recall(y_hat, **kwargs):
+    """Handle recall.
+    
+    Args:
+        y_hat: Predicted labels or scores.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     tp = true_positive(y_hat, **kwargs)
     fn = false_negative(y_hat, **kwargs)
     
@@ -96,6 +139,12 @@ def _recall(y_hat, **kwargs):
     return tp / (tp + fn)
 
 def binary_precision(y_hat, **kwargs):
+    """Handle binary precision.
+    
+    Args:
+        y_hat: Predicted labels or scores.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     average = kwargs.get('average')
     if average is None:
         return _precision(y_hat, **kwargs)
@@ -105,6 +154,12 @@ def binary_precision(y_hat, **kwargs):
         raise ValueError(f'{average} method is unknown')
     
 def binary_recall(y_hat, **kwargs):
+    """Handle binary recall.
+    
+    Args:
+        y_hat: Predicted labels or scores.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     average = kwargs.get('average')
     if average is None:
         return _recall(y_hat, **kwargs)
@@ -114,6 +169,12 @@ def binary_recall(y_hat, **kwargs):
         raise ValueError(f'{average} method is unknown')
 
 def _f1_score(y_hat, **kwargs):
+    """Handle f1 score.
+    
+    Args:
+        y_hat: Predicted labels or scores.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     kwargs['average'] = None
     precision = binary_precision(y_hat, **kwargs)
     recall = binary_recall(y_hat, **kwargs)
@@ -126,12 +187,18 @@ def _f1_score(y_hat, **kwargs):
     
     # Controllo per NaN
     if torch.isnan(f1):
-        print('F1 is NaN!')
+        debug_print('F1 is NaN!')
         return torch.tensor(0.0)
     
     return f1
 
 def binary_f1_score(y_hat, **kwargs):
+    """Handle binary f1 score.
+    
+    Args:
+        y_hat: Predicted labels or scores.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     average = kwargs.get('average')
     if average is None:
         return _f1_score(y_hat, **kwargs)
@@ -141,6 +208,12 @@ def binary_f1_score(y_hat, **kwargs):
         raise ValueError(f'{average} method is unknown')
 
 def _weighted_f1_score(y_hat, **kwargs):
+    """Handle weighted f1 score.
+    
+    Args:
+        y_hat: Predicted labels or scores.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     positive_mask = kwargs.get('positive_mask')
     assert positive_mask is not None 
     negative_mask = ~positive_mask
@@ -153,6 +226,12 @@ def _weighted_f1_score(y_hat, **kwargs):
     return (n_positive * f1_score_class_1 + n_negative * f1_score_class_0) / n_records
 
 def _weighted_precision(y_hat, **kwargs):
+    """Handle weighted precision.
+    
+    Args:
+        y_hat: Predicted labels or scores.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     positive_mask = kwargs.get('positive_mask')
     assert positive_mask is not None 
     negative_mask = ~positive_mask
@@ -165,6 +244,12 @@ def _weighted_precision(y_hat, **kwargs):
     return (n_positive * precision_class_1 + n_negative * precision_class_0) / n_records
 
 def _weighted_recall(y_hat, **kwargs):
+    """Handle weighted recall.
+    
+    Args:
+        y_hat: Predicted labels or scores.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     positive_mask = kwargs.get('positive_mask')
     assert positive_mask is not None 
     negative_mask = ~positive_mask
@@ -179,6 +264,12 @@ def _weighted_recall(y_hat, **kwargs):
 
 
 def multiclass_accuracy(probabilities,**kwargs): 
+    """Handle multiclass accuracy.
+    
+    Args:
+        probabilities: Predicted class probabilities or soft assignments.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     n_records = probabilities.shape[0]
     tp_list = true_positive_multiclass(probabilities,**kwargs)
     tp = torch.sum(tp_list)
@@ -186,6 +277,12 @@ def multiclass_accuracy(probabilities,**kwargs):
     return accuracy
 
 def multiclass_precision(probabilities,**kwargs):
+    """Handle multiclass precision.
+    
+    Args:
+        probabilities: Predicted class probabilities or soft assignments.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     average = kwargs.get('average')
     kwargs['average'] = None
     labels = kwargs.get('labels')
@@ -211,6 +308,12 @@ def multiclass_precision(probabilities,**kwargs):
             raise ValueError(f'{average} method is unknown')
     
 def multiclass_recall(probabilities,**kwargs):
+    """Handle multiclass recall.
+    
+    Args:
+        probabilities: Predicted class probabilities or soft assignments.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     average = kwargs.get('average')
     kwargs['average'] = None
     labels = kwargs.get('labels')
@@ -236,6 +339,12 @@ def multiclass_recall(probabilities,**kwargs):
             raise ValueError(f'{average} method is unknown')
 
 def multiclass_f1_score(probabilities,**kwargs):
+    """Handle multiclass f1 score.
+    
+    Args:
+        probabilities: Predicted class probabilities or soft assignments.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     average = kwargs.get('average')
     kwargs['average'] = None
     labels = kwargs.get('labels')
@@ -264,6 +373,12 @@ def multiclass_f1_score(probabilities,**kwargs):
             raise ValueError(f'{average} method is unknown')
             
 def true_positive_multiclass(probabilities,**kwargs):
+    """Handle true positive multiclass.
+    
+    Args:
+        probabilities: Predicted class probabilities or soft assignments.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     labels = kwargs.get('labels')
     tp_list = torch.zeros(probabilities.shape[1])
     for i in range(probabilities.shape[1]):
@@ -277,6 +392,12 @@ def true_positive_multiclass(probabilities,**kwargs):
     return tp_list
 
 def true_negative_multiclass(probabilities,**kwargs):
+    """Handle true negative multiclass.
+    
+    Args:
+        probabilities: Predicted class probabilities or soft assignments.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     labels = kwargs.get('labels')
     tn_list = torch.zeros(probabilities.shape[1])
     for i in range(probabilities.shape[1]):
@@ -290,6 +411,12 @@ def true_negative_multiclass(probabilities,**kwargs):
     return tn_list
 
 def false_positive_multiclass(probabilities,**kwargs):
+    """Handle false positive multiclass.
+    
+    Args:
+        probabilities: Predicted class probabilities or soft assignments.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     labels = kwargs.get('labels')
     fp_list = torch.zeros(probabilities.shape[1])
     for i in range(probabilities.shape[1]):
@@ -303,6 +430,12 @@ def false_positive_multiclass(probabilities,**kwargs):
     return fp_list
 
 def false_negative_multiclass(probabilities,**kwargs):
+    """Handle false negative multiclass.
+    
+    Args:
+        probabilities: Predicted class probabilities or soft assignments.
+        **kwargs: Additional options forwarded to the implementation.
+    """
     labels = kwargs.get('labels')
     fn_list = torch.zeros(probabilities.shape[1])
     for i in range(probabilities.shape[1]):

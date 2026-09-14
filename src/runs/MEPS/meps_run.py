@@ -1,14 +1,22 @@
 from ..base_run import BaseRun
 from architectures import ArchitectureFactory
 
-class CentralizedMEPRun(BaseRun):
+class MEPSRun(BaseRun):
     
+    """Dataset and model configuration for MEPS."""
     def __init__(self,**kwargs):
-        super(CentralizedMEPRun, self).__init__(**kwargs)
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
+        super().__init__(**kwargs)
         self.input = 132
         self.hidden1 = 300
         self.hidden2 = 100
         self.dropout = 0.2
+        self.learning_rate = 1e-4
+        self.batch_size = 128
         self.num_classes=2
         self.output = self.num_classes
         self.model = ArchitectureFactory.create_architecture('mlp2hidden',model_params={
@@ -17,9 +25,10 @@ class CentralizedMEPRun(BaseRun):
                                                 'hidden2': self.hidden2,
                                                 'dropout': self.dropout,
                                                 'output': self.output})
-        self.dataset = 'mep'
-        self.data_root  = '../data/Centralized_MEP'
-        self.clean_data_path = '../data/Centralized_MEP/mep1_clean.csv'
+        self.dataset = 'meps'
+        self.data_file_prefix = 'meps'
+        self.data_root = self.resolve_experiment_data_root(kwargs, 'MEPS')
+        self.clean_data_path = kwargs.get('clean_data_path') or f'{self.data_root}/meps_clean.csv'
         race_values = ['Hispanic','Black','White','Other']
         marry_values = ['Married','Never Married','Other']
         gender_values = ['Male','Female']
@@ -50,12 +59,17 @@ class CentralizedMEPRun(BaseRun):
                                                   marry_var:marry_values,
                                                   race_var:race_values})
                                                 ])
+        self.configure_validation_splits(
+            kwargs, 'HIGH_EXPENSES', ('RACE', 'MARRY'))
         
         
 
     def setUp(self):
+        """Handle setUp."""
         pass
     def run(self):
+        """Handle run."""
         pass
     def tearDown(self):
+        """Handle tearDown."""
         pass

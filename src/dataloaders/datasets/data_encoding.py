@@ -3,10 +3,27 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
 
 
 def fit_scalers(df_orig, categorical_cols,
-                numerical_cols, label_encoder_cols):
+                numerical_cols, label_encoder_cols,
+                categorical_categories=None):
+    """Train scalers.
+    
+    Args:
+        df_orig: Source dataframe to encode.
+        categorical_cols: Categorical columns to encode.
+        numerical_cols: Numerical columns to scale.
+        label_encoder_cols: Columns to label-encode.
+    """
     scalers = {}
+    categorical_categories = categorical_categories or {}
     for cat in categorical_cols:
-        scalers[cat] = OneHotEncoder(sparse_output=False).fit(df_orig[[cat]])
+        declared_categories = categorical_categories.get(cat)
+        encoder_kwargs = {
+            'sparse_output': False,
+            'handle_unknown': 'ignore',
+        }
+        if declared_categories is not None:
+            encoder_kwargs['categories'] = [list(declared_categories)]
+        scalers[cat] = OneHotEncoder(**encoder_kwargs).fit(df_orig[[cat]])
     for cat in numerical_cols:
         scalers[cat] = StandardScaler().fit(df_orig[[cat]])
     for label in label_encoder_cols:
@@ -15,6 +32,13 @@ def fit_scalers(df_orig, categorical_cols,
 
 
 def encode_categorical(df_orig, attribute, ohe):
+    """Handle encode categorical.
+    
+    Args:
+        df_orig: Source dataframe to encode.
+        attribute: Column or sensitive attribute to transform.
+        ohe: One-hot encoder instance.
+    """
     df = df_orig.copy()
     cols = df.columns.to_list()
     found_idx = -1
@@ -39,18 +63,41 @@ def encode_categorical(df_orig, attribute, ohe):
 
 
 def encode_numerical(df_orig, attribute, sc):
+    """Handle encode numerical.
+    
+    Args:
+        df_orig: Source dataframe to encode.
+        attribute: Column or sensitive attribute to transform.
+        sc: Scaler instance.
+    """
     df = df_orig.copy()
     df[attribute] = sc.transform(df[[attribute]])
     return df
 
 
 def encode_label(df_orig, attribute, lb):
+    """Handle encode label.
+    
+    Args:
+        df_orig: Source dataframe to encode.
+        attribute: Column or sensitive attribute to transform.
+        lb: Label encoder instance.
+    """
     df = df_orig.copy()
     df[attribute] = lb.transform(df[[attribute]])
     return df
 
 
 def encode_dataset(df, cat_cols, num_cols, label_cols, scalers):
+    """Handle encode dataset.
+    
+    Args:
+        df: Input dataframe.
+        cat_cols: Categorical columns to encode.
+        num_cols: Numerical columns to scale.
+        label_cols: Columns to label-encode.
+        scalers: Pre-fitted encoders/scalers used for transformation.
+    """
     df_enc = df.copy()
     for cat in cat_cols:
         df_enc = encode_categorical(df_enc, cat, scalers[cat])
@@ -62,6 +109,13 @@ def encode_dataset(df, cat_cols, num_cols, label_cols, scalers):
 
 
 def decode_categorical(df_orig, attribute, ohe):
+    """Handle decode categorical.
+    
+    Args:
+        df_orig: Source dataframe to encode.
+        attribute: Column or sensitive attribute to transform.
+        ohe: One-hot encoder instance.
+    """
     df = df_orig.copy()
     cols = df.columns.to_list()
     found = False
@@ -85,18 +139,41 @@ def decode_categorical(df_orig, attribute, ohe):
 
 
 def decode_numerical(df_orig, attribute, sc):
+    """Handle decode numerical.
+    
+    Args:
+        df_orig: Source dataframe to encode.
+        attribute: Column or sensitive attribute to transform.
+        sc: Scaler instance.
+    """
     df = df_orig.copy()
     df[attribute] = sc.inverse_transform(df[[attribute]])
     return df
 
 
 def decode_label(df_orig, attribute, lb):
+    """Handle decode label.
+    
+    Args:
+        df_orig: Source dataframe to encode.
+        attribute: Column or sensitive attribute to transform.
+        lb: Label encoder instance.
+    """
     df = df_orig.copy()
     df[attribute] = lb.inverse_transform(df[[attribute]])
     return df
 
 
 def decode_dataset(df, cat_cols, num_cols, label_cols, scalers):
+    """Handle decode dataset.
+    
+    Args:
+        df: Input dataframe.
+        cat_cols: Categorical columns to encode.
+        num_cols: Numerical columns to scale.
+        label_cols: Columns to label-encode.
+        scalers: Pre-fitted encoders/scalers used for transformation.
+    """
     df_dec = df.copy()
     for cat in cat_cols:
         df_dec = decode_categorical(df_dec, cat, scalers[cat])

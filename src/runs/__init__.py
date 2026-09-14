@@ -1,12 +1,18 @@
 from .run_factory import RunFactory
 
-from .FolkTablesBinary.folk_fairlab import *
-from .CompasCentralized.compas_fairlab import *
-from .MEPCentralized.mep_fairlab import *
-from .CompasCentralized.compas_fedavg import * 
-from .Employment.employment_fairlab import *
-from .Insurance.insurance_fairlab import *
-from .Income_4.income_4_fairlab import *
-from .Education.education_fairlab import *
-from .FL_Compas.compas_fairlab import *
-__all__=['RunFactory']
+from .Compas.compas_fairlab import CompasFedFairLabRun
+from .Education.education_fairlab import EducationFedFairLabRun
+from .Employment.employment_fairlab import EmploymentFedFairLabRun
+from .Income.income_fairlab import IncomeFedFairLabRun
+from .Income_3.income_3_fairlab import Income3FedFairLabRun
+from .MEPS.meps_fairlab import MEPSFedFairLabRun
+
+__all__ = [
+    "RunFactory",
+    "CompasFedFairLabRun",
+    "EducationFedFairLabRun",
+    "EmploymentFedFairLabRun",
+    "IncomeFedFairLabRun",
+    "Income3FedFairLabRun",
+    "MEPSFedFairLabRun",
+]

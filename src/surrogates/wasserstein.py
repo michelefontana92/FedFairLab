@@ -1,9 +1,16 @@
+from debug_utils import debug_print
 from .surrogate_factory import register_surrogate
 import torch
 
 @register_surrogate('wasserstein')
 class WassersteinSurrogate:
+    """Implementation of WassersteinSurrogate."""
     def __init__(self, **kwargs) -> None:
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         self.surrogate_name = kwargs.get('surrogate_name', 'wasserstein')
         self.weight = kwargs.get('weight', 1.0)
         self.group_name = kwargs.get('group_name')
@@ -24,6 +31,14 @@ class WassersteinSurrogate:
 
     def _wasserstein_distance_local(self,p,q,group_masks, target_groups):
        
+        """Handle wasserstein distance local.
+        
+        Args:
+            p: First probability distribution.
+            q: Second probability distribution.
+            group_masks: Group-membership masks indexed by sensitive attribute.
+            target_groups: Groups targeted by the constraint or distance.
+        """
         assert p.shape[1] == q.shape[1], 'Probabilities and target_probabilities must have the same number of classes' 
         positive_mask = torch.isin(group_masks, target_groups)
         if torch.sum(positive_mask) == 0:
@@ -37,6 +52,12 @@ class WassersteinSurrogate:
 
     def _wasserstein_distance_global(self,p,q):
     
+        """Handle wasserstein distance global.
+        
+        Args:
+            p: First probability distribution.
+            q: Second probability distribution.
+        """
         assert p.shape[1] == q.shape[1], 'Probabilities and target_probabilities must have the same number of classes' 
         assert p.shape[0] == q.shape[0], 'Probabilities and target_probabilities must have the same number of samples'
         #print('p: ',torch.mean(p,dim=0))
@@ -48,6 +69,11 @@ class WassersteinSurrogate:
     
     def __call__(self, **kwargs):
         #print('Wasserstein surrogate called')
+        """Evaluate the callable object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
         probabilities = kwargs.get('probabilities')
         teacher_probabilities_list = kwargs.get('wasserstein_teacher_probabilities')
         assert probabilities is not None, 'probabilities must be provided'
@@ -56,11 +82,11 @@ class WassersteinSurrogate:
         #assert isinstance(teacher_probabilities_list, list), 'teacher_probabilities must be a list'
         # Controllo NaN nei probabilities
         if torch.isnan(probabilities).any():
-            print('Probabilities contengono NaN!')
+            debug_print('Probabilities contengono NaN!')
             raise ValueError('Probabilities contiene NaN!')
         
         if torch.isnan(teacher_probabilities).any():
-            print('Teacher probabilities contengono NaN!')
+            debug_print('Teacher probabilities contengono NaN!')
             raise ValueError('Teacher probabilities contiene NaN!')
        
         group_masks = kwargs.get('group_masks')

@@ -1,26 +1,29 @@
-import shutil
 from .compas_run import CompasRun
 from ..run_factory import register_run
 from builder import FedFairLabBuilder
 
 
 @register_run('compas_fedfairlab')
-class FLCompasHierALMCentralized(CompasRun):
+class CompasFedFairLabRun(CompasRun):
+    """FedFairLab experiment configuration for COMPAS."""
     def __init__(self, **kwargs) -> None:
-        super(FLCompasHierALMCentralized, self).__init__(**kwargs)
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
+        super().__init__(**kwargs)
         kwargs['run_dict'] = self.to_dict()
         self.builder = FedFairLabBuilder(**kwargs)
     
     def setUp(self):
-        #print(self.builder.clients)
+        """Handle setUp."""
         pass
     
     def run(self):
+        """Handle run."""
         self.builder.run()
 
-    def eval(self):
-        pass      
     def tearDown(self) -> None:
-        # Pulizia finale dei file di checkpoint, se necessario
-        #pass
-        shutil.rmtree(f'checkpoints/{self.project_name}')
+        """Handle tearDown."""
+        super().tearDown()

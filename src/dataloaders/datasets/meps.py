@@ -2,24 +2,30 @@ import os
 from .dataset_factory import register_dataset
 from .base_dataset import BaseDataset
 
-@register_dataset('mep')
-class MEPDataset(BaseDataset):
+@register_dataset('meps')
+class MEPSDataset(BaseDataset):
 
+    """Medical Expenditure Panel Survey dataset."""
     def __init__(self,**kwargs):
-        super(MEPDataset, self).__init__(**kwargs)
-        self.root = kwargs.get('root', 'data/Centralized_MEP')
+        """Initialize the object.
+        
+        Args:
+            **kwargs: Additional options forwarded to the implementation.
+        """
+        super().__init__(**kwargs)
+        self.root = kwargs.get('root', 'data/10_Clients/MEPS')
         data_name = kwargs['filename']
 
         self.data_path = os.path.join(self.root, data_name)
         
         self.scaler_name = kwargs.get('scaler_name', 
-                                      'mep_scalers.p')
+                                      'meps_scalers.p')
         self.sensitive_attributes = kwargs.get('sensitive_attributes',
                                                 [{}])
        
         self.scaler_path = f'{self.root}/{self.scaler_name}'
-        self.clean_data_path = kwargs.get('clean_data_path', 
-                                          os.path.join(self.root, 'fake_mep.csv'))
+        self.clean_data_path = kwargs.get(
+            'clean_data_path', os.path.join(self.root, 'meps_clean.csv'))
         self.target = 'HIGH_EXPENSES'
         self.cat_cols = [
             'RACE',
